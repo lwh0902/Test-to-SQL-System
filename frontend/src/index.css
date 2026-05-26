@@ -1,0 +1,95 @@
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100vh;
+}
+
+/* PC: 侧边栏始终可见 */
+.desktop-sider {
+  display: flex !important;
+}
+
+/* Sider 内部去掉默认 padding */
+.desktop-sider .ant-layout-sider-children {
+  padding: 0 !important;
+  width: 100% !important;
+}
+
+/* 移动端菜单按钮和头像默认隐藏 */
+.mobile-menu-btn,
+.mobile-user-avatar {
+  display: none !important;
+}
+
+/* ====== 平板 (≤1024px) ====== */
+@media (max-width: 1024px) {
+  .desktop-sider {
+    width: 220px !important;
+    min-width: 220px !important;
+    max-width: 220px !important;
+    flex: 0 0 220px !important;
+  }
+}
+
+/* ====== 手机 (≤768px) ====== */
+@media (max-width: 768px) {
+  /* 隐藏 PC 侧边栏 */
+  .desktop-sider {
+    display: none !important;
+  }
+
+  /* 显示移动端菜单按钮 */
+  .mobile-menu-btn {
+    display: flex !important;
+  }
+
+  /* 显示用户头像 */
+  .mobile-user-avatar {
+    display: flex !important;
+  }
+
+  /* 隐藏描述文字 */
+  .hide-mobile {
+    display: none !important;
+  }
+}
+
+/* ====== Ant Design 覆盖 ====== */
+
+/* Collapse 无边框 */
+.ant-collapse {
+  background: transparent !important;
+  border: none !important;
+}
+.ant-collapse > .ant-collapse-item > .ant-collapse-header {
+  padding: 6px 0 !important;
+}
+
+/* Drawer 内部样式 */
+.ant-drawer-body {
+  padding: 0 !important;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #aaa;
+}
+
+/* 流式回答光标闪烁 */
+@keyframes blink {
+  50% { opacity: 0; }
+}

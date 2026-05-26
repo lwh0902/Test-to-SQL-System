@@ -1,0 +1,111 @@
+# 评测用例集
+# 每次修改 Parser 后跑 eval 脚本验证准确率
+
+- question: 最近7天扫描成功率趋势怎么样
+  expected_metric: scan_success_rate
+  expected_query_type: trend
+  should_clarify: false
+
+- question: 最近3天扫描次数是多少
+  expected_metric: scan_count
+  expected_query_type: fact
+  should_clarify: false
+
+- question: 最近30天错误分布如何
+  expected_metric: error_distribution
+  expected_query_type: breakdown
+  should_clarify: false
+
+- question: 最近7天身份证扫描成功率趋势
+  expected_metric: scan_success_rate
+  expected_query_type: trend
+  expected_filters:
+    scan_type: id_card
+  should_clarify: false
+
+- question: 最近数据怎么样
+  expected_metric: null
+  should_clarify: true
+
+- question: Android设备的扫描成功率
+  expected_metric: scan_success_rate
+  expected_filters:
+    device_type: android
+  should_clarify: false
+
+- question: 最近14天API响应时间趋势
+  expected_metric: api_response_time
+  expected_query_type: trend
+  should_clarify: false
+
+- question: OCR的失败原因分布
+  expected_metric: error_distribution
+  expected_query_type: breakdown
+  expected_filters:
+    scan_type: ocr
+  should_clarify: false
+
+- question: 功能使用量按功能分组
+  expected_metric: feature_usage
+  expected_query_type: breakdown
+  should_clarify: false
+
+- question: 最近7天/api/v2/verify接口成功率
+  expected_metric: api_success_rate
+  expected_filters:
+    api_name: /api/v2/verify
+  should_clarify: false
+
+- question: 扫描量趋势
+  expected_metric: scan_count
+  expected_query_type: trend
+  should_clarify: false
+
+- question: 最近一周银行卡扫描次数
+  expected_metric: scan_count
+  expected_query_type: fact
+  expected_filters:
+    scan_type: bank_card
+  should_clarify: false
+
+- question: 最近一个月api成功率
+  expected_metric: api_success_rate
+  should_clarify: false
+
+- question: 帮我看看今天的整体情况
+  expected_metric: null
+  should_clarify: true
+
+- question: 最近7天扫描成功率按设备拆解
+  expected_metric: scan_success_rate
+  expected_query_type: breakdown
+  expected_dimensions:
+    - device_type
+  should_clarify: false
+
+- question: iOS设备的扫描成功率是多少
+  expected_metric: scan_success_rate
+  expected_filters:
+    device_type: ios
+  should_clarify: false
+
+- question: 人脸识别的成功率
+  expected_metric: scan_success_rate
+  expected_filters:
+    scan_type: face
+  should_clarify: false
+
+- question: 最近7天各接口的响应时间
+  expected_metric: api_response_time
+  expected_query_type: breakdown
+  should_clarify: false
+
+- question: 最近三天接口错误分布
+  expected_metric: error_distribution
+  expected_query_type: breakdown
+  should_clarify: false
+
+- question: 昨天功能使用量汇总
+  expected_metric: feature_usage
+  expected_query_type: fact
+  should_clarify: false

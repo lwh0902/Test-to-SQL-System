@@ -1,0 +1,456 @@
+scan_success_rate:
+  name: 扫描成功率
+  description: 各类扫描的成功率统计
+  allowed_dimensions:
+    - date
+    - scan_type
+    - device_type
+    - error_type
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+    - comparison
+    - anomaly_breakdown
+  roles:
+    - admin
+    - tester
+    - product
+  permitted_tables:
+    - scan_records
+  sensitive_fields:
+    - phone
+    - id_card
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [success_rate]
+      labels:
+        success_rate: 扫描成功率 (%)
+      value_format: percent
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [success_rate]
+      labels:
+        success_rate: 成功率 (%)
+        dimension_value: 维度
+      value_format: percent
+    fact:
+      type: stat
+      y_fields: [success_rate]
+      labels:
+        success_rate: 成功率 (%)
+      value_format: percent
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        ROUND(SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) AS success_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.scan_type %}
+        AND {{ table }}.scan_type = :scan_type
+        {% endif %}
+        {% if filters.device_type %}
+        AND {{ table }}.device_type = :device_type
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        ROUND(SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN {{ table }}.status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.scan_type %}
+        AND {{ table }}.scan_type = :scan_type
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        ROUND(SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) AS success_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY total_count DESC
+      LIMIT :limit
+
+scan_count:
+  name: 扫描次数
+  description: 扫描次数统计
+  allowed_dimensions:
+    - date
+    - scan_type
+    - device_type
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - tester
+    - product
+  permitted_tables:
+    - scan_records
+  sensitive_fields:
+    - phone
+    - id_card
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [scan_count]
+      labels:
+        scan_count: 扫描次数
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [scan_count]
+      labels:
+        scan_count: 次数
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        COUNT(*) AS scan_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.scan_type %}
+        AND {{ table }}.scan_type = :scan_type
+        {% endif %}
+        {% if filters.device_type %}
+        AND {{ table }}.device_type = :device_type
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS scan_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.scan_type %}
+        AND {{ table }}.scan_type = :scan_type
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS scan_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY scan_count DESC
+      LIMIT :limit
+
+error_distribution:
+  name: 错误分布
+  description: 扫描失败错误类型分布
+  allowed_dimensions:
+    - error_type
+    - scan_type
+    - device_type
+  default_dimension: error_type
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - breakdown
+  roles:
+    - admin
+    - tester
+    - developer
+  permitted_tables:
+    - scan_records
+  sensitive_fields:
+    - phone
+    - id_card
+  chart:
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [error_count]
+      labels:
+        error_count: 错误次数
+        dimension_value: 错误类型
+      value_format: number
+  sql_templates:
+    fact: >
+      SELECT
+        error_type,
+        COUNT(*) AS error_count,
+        ROUND(COUNT(*) * 100.0 / NULLIF((SELECT COUNT(*) FROM scan_records WHERE status = 'failed' AND created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id), 0), 2) AS error_percentage
+      FROM scan_records
+      WHERE status = 'failed'
+        AND created_at >= :start_time
+        AND created_at < :end_time
+        AND workspace_id = :workspace_id
+        AND error_type IS NOT NULL
+      GROUP BY error_type
+      ORDER BY error_count DESC
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ dimension }} AS dimension_value,
+        error_type,
+        COUNT(*) AS error_count
+      FROM scan_records
+      WHERE status = 'failed'
+        AND created_at >= :start_time
+        AND created_at < :end_time
+        AND workspace_id = :workspace_id
+        AND error_type IS NOT NULL
+      GROUP BY {{ dimension }}, error_type
+      ORDER BY error_count DESC
+      LIMIT :limit
+
+api_success_rate:
+  name: API成功率
+  description: API调用的成功率统计
+  allowed_dimensions:
+    - date
+    - api_name
+    - method
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - tester
+    - developer
+  permitted_tables:
+    - api_logs
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [success_rate]
+      labels:
+        success_rate: API成功率 (%)
+      value_format: percent
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [success_rate]
+      labels:
+        success_rate: 成功率 (%)
+      value_format: percent
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        ROUND(SUM(CASE WHEN {{ table }}.is_error = 0 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN {{ table }}.is_error = 1 THEN 1 ELSE 0 END) AS error_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.api_name %}
+        AND {{ table }}.api_name = :api_name
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        ROUND(SUM(CASE WHEN {{ table }}.is_error = 0 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN {{ table }}.is_error = 1 THEN 1 ELSE 0 END) AS error_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        ROUND(SUM(CASE WHEN {{ table }}.is_error = 0 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY total_count DESC
+      LIMIT :limit
+
+api_response_time:
+  name: API响应时间
+  description: API调用的平均响应时间
+  allowed_dimensions:
+    - date
+    - api_name
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - developer
+  permitted_tables:
+    - api_logs
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [avg_response_ms]
+      labels:
+        avg_response_ms: 平均响应时间 (ms)
+      value_format: duration_ms
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [avg_response_ms]
+      labels:
+        avg_response_ms: 平均响应时间 (ms)
+      value_format: duration_ms
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        ROUND(AVG({{ table }}.response_time_ms), 2) AS avg_response_ms,
+        ROUND(MAX({{ table }}.response_time_ms), 2) AS max_response_ms,
+        COUNT(*) AS request_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.api_name %}
+        AND {{ table }}.api_name = :api_name
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        ROUND(AVG({{ table }}.response_time_ms), 2) AS avg_response_ms,
+        ROUND(MAX({{ table }}.response_time_ms), 2) AS max_response_ms,
+        ROUND(MIN({{ table }}.response_time_ms), 2) AS min_response_ms,
+        COUNT(*) AS request_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        ROUND(AVG({{ table }}.response_time_ms), 2) AS avg_response_ms,
+        COUNT(*) AS request_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY avg_response_ms DESC
+      LIMIT :limit
+
+feature_usage:
+  name: 功能使用量
+  description: 各功能模块的使用次数统计
+  allowed_dimensions:
+    - date
+    - feature_name
+    - event_type
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - tester
+    - product
+  permitted_tables:
+    - feature_events
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [usage_count]
+      labels:
+        usage_count: 使用量
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [usage_count]
+      labels:
+        usage_count: 使用量
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        COUNT(*) AS usage_count,
+        SUM(CASE WHEN {{ table }}.is_success = 1 THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN {{ table }}.is_success = 0 THEN 1 ELSE 0 END) AS fail_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.feature_name %}
+        AND {{ table }}.feature_name = :feature_name
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS usage_count,
+        SUM(CASE WHEN {{ table }}.is_success = 1 THEN 1 ELSE 0 END) AS success_count,
+        SUM(CASE WHEN {{ table }}.is_success = 0 THEN 1 ELSE 0 END) AS fail_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS usage_count,
+        SUM(CASE WHEN {{ table }}.is_success = 1 THEN 1 ELSE 0 END) AS success_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY usage_count DESC
+      LIMIT :limit

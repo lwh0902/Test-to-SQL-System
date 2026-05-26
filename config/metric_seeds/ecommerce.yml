@@ -1,0 +1,613 @@
+# 电商经营分析指标配置
+gmv:
+  name: 销售额 GMV
+  description: 订单支付总金额（含已付款和已完成订单）
+  allowed_dimensions:
+    - date
+    - category
+    - source_channel
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+    - anomaly_breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - ecom_orders
+    - ecom_order_items
+  table_aliases:
+    main: ecom_orders
+    orders: ecom_orders
+    items: ecom_order_items
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [gmv]
+      labels:
+        gmv: 销售额 (元)
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [gmv]
+      labels:
+        gmv: 销售额 (元)
+        dimension_value: 维度
+      value_format: number
+    fact:
+      type: stat
+      y_fields: [gmv]
+      labels:
+        gmv: 销售额 (元)
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ orders }}.created_at) AS {{ dimension }},
+        SUM({{ orders }}.pay_amount) AS gmv,
+        COUNT(DISTINCT {{ orders }}.id) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.created_at >= :start_time
+        AND {{ orders }}.created_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ orders }}.workspace_id = :workspace_id
+        {% if filters.source_channel %}
+        AND {{ orders }}.source_channel = :source_channel
+        {% endif %}
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        SUM({{ orders }}.pay_amount) AS gmv,
+        COUNT(DISTINCT {{ orders }}.id) AS order_count,
+        ROUND(AVG({{ orders }}.pay_amount), 2) AS avg_order_value
+      FROM {{ orders }}
+      WHERE {{ orders }}.created_at >= :start_time
+        AND {{ orders }}.created_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ orders }}.workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ orders }}.{{ dimension }} AS dimension_value,
+        SUM({{ orders }}.pay_amount) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.created_at >= :start_time
+        AND {{ orders }}.created_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ orders }}.{{ dimension }}
+      ORDER BY gmv DESC
+      LIMIT :limit
+
+order_count:
+  name: 订单数
+  description: 有效订单数量统计
+  allowed_dimensions:
+    - date
+    - category
+    - source_channel
+    - status
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+    - anomaly_breakdown
+    - comparison
+  roles:
+    - admin
+    - operator
+    - product
+    - tester
+  permitted_tables:
+    - ecom_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [order_count]
+      labels:
+        order_count: 订单数
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [order_count]
+      labels:
+        order_count: 订单数
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN {{ table }}.status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN {{ table }}.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        {% if filters.source_channel %}
+        AND {{ table }}.source_channel = :source_channel
+        {% endif %}
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count
+      FROM {{ table }}
+      WHERE created_at >= :start_time
+        AND created_at < :end_time
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY order_count DESC
+      LIMIT :limit
+
+avg_order_value:
+  name: 客单价
+  description: 平均每笔订单的支付金额
+  allowed_dimensions:
+    - date
+    - source_channel
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - ecom_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [avg_order_value]
+      labels:
+        avg_order_value: 客单价 (元)
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [avg_order_value]
+      labels:
+        avg_order_value: 客单价 (元)
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        ROUND(AVG({{ table }}.pay_amount), 2) AS avg_order_value,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        ROUND(AVG(pay_amount), 2) AS avg_order_value,
+        MIN(pay_amount) AS min_order_value,
+        MAX(pay_amount) AS max_order_value,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE created_at >= :start_time
+        AND created_at < :end_time
+        AND status IN ('paid', 'shipped', 'completed')
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        ROUND(AVG({{ table }}.pay_amount), 2) AS avg_order_value,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY avg_order_value DESC
+      LIMIT :limit
+
+pay_conversion_rate:
+  name: 支付转化率
+  description: 从浏览到支付的用户转化率
+  allowed_dimensions:
+    - date
+    - source_channel
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - anomaly_breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - ecom_traffic_events
+    - ecom_orders
+  table_aliases:
+    main: ecom_traffic_events
+    traffic: ecom_traffic_events
+    orders: ecom_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [conversion_rate]
+      labels:
+        conversion_rate: 转化率 (%)
+      value_format: percent
+  sql_templates:
+    trend: >
+      SELECT
+        d.date AS {{ dimension }},
+        ROUND(COALESCE(paid.paid_count, 0) * 100.0 / NULLIF(COALESCE(viewed.view_count, 0), 0), 2) AS conversion_rate,
+        COALESCE(viewed.view_count, 0) AS view_count,
+        COALESCE(paid.paid_count, 0) AS paid_count
+      FROM (SELECT DISTINCT DATE(created_at) AS date FROM ecom_traffic_events WHERE created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id) d
+      LEFT JOIN (SELECT DATE(created_at) AS date, COUNT(*) AS view_count FROM ecom_traffic_events WHERE event_type = 'page_view' AND created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id GROUP BY DATE(created_at)) viewed ON d.date = viewed.date
+      LEFT JOIN (SELECT DATE(created_at) AS date, COUNT(*) AS paid_count FROM ecom_orders WHERE status IN ('paid', 'shipped', 'completed') AND created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id GROUP BY DATE(created_at)) paid ON d.date = paid.date
+      ORDER BY d.date ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        ROUND(COALESCE(paid_count, 0) * 100.0 / NULLIF(COALESCE(view_count, 0), 0), 2) AS conversion_rate,
+        COALESCE(view_count, 0) AS view_count,
+        COALESCE(paid_count, 0) AS paid_count
+      FROM (SELECT COUNT(*) AS view_count FROM ecom_traffic_events WHERE event_type = 'page_view' AND created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id) viewed,
+           (SELECT COUNT(*) AS paid_count FROM ecom_orders WHERE status IN ('paid', 'shipped', 'completed') AND created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id) paid
+      LIMIT :limit
+
+refund_rate:
+  name: 退款率
+  description: 已完成订单的退款比例
+  allowed_dimensions:
+    - date
+    - reason
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - operator
+  permitted_tables:
+    - ecom_refunds
+    - ecom_orders
+  table_aliases:
+    main: ecom_refunds
+    refunds: ecom_refunds
+    orders: ecom_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [refund_rate]
+      labels:
+        refund_rate: 退款率 (%)
+      value_format: percent
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [refund_count]
+      labels:
+        refund_count: 退款次数
+        dimension_value: 退款原因
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ refunds }}.created_at) AS {{ dimension }},
+        COUNT(*) AS refund_count,
+        ROUND(SUM({{ refunds }}.refund_amount), 2) AS refund_amount
+      FROM {{ refunds }}
+      WHERE {{ refunds }}.created_at >= :start_time
+        AND {{ refunds }}.created_at < :end_time
+        AND {{ refunds }}.status = 'completed'
+        AND {{ refunds }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS refund_count,
+        ROUND(SUM(refund_amount), 2) AS refund_amount,
+        (SELECT COUNT(*) FROM ecom_orders WHERE status = 'completed' AND created_at >= :start_time AND created_at < :end_time AND workspace_id = :workspace_id) AS completed_orders
+      FROM {{ refunds }}
+      WHERE status = 'completed'
+        AND created_at >= :start_time
+        AND created_at < :end_time
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ refunds }}.reason AS dimension_value,
+        COUNT(*) AS refund_count,
+        ROUND(SUM({{ refunds }}.refund_amount), 2) AS refund_amount
+      FROM {{ refunds }}
+      WHERE {{ refunds }}.created_at >= :start_time
+        AND {{ refunds }}.created_at < :end_time
+        AND {{ refunds }}.status = 'completed'
+        AND {{ refunds }}.workspace_id = :workspace_id
+        AND {{ refunds }}.reason IS NOT NULL
+      GROUP BY {{ refunds }}.reason
+      ORDER BY refund_count DESC
+      LIMIT :limit
+
+product_sales_rank:
+  name: 商品销量排行
+  description: 按商品销量排序的 Top 排行
+  allowed_dimensions:
+    - category
+    - product_name
+  default_dimension: product_name
+  max_time_range_days: 90
+  allowed_query_types:
+    - breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - ecom_order_items
+    - ecom_orders
+  table_aliases:
+    main: ecom_order_items
+    items: ecom_order_items
+    orders: ecom_orders
+  sensitive_fields: []
+  chart:
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [sales_count]
+      labels:
+        sales_count: 销量
+        dimension_value: 商品
+      value_format: number
+  sql_templates:
+    breakdown: >
+      SELECT
+        {{ items }}.product_name AS dimension_value,
+        {{ items }}.category,
+        SUM({{ items }}.quantity) AS sales_count,
+        ROUND(SUM({{ items }}.subtotal), 2) AS sales_amount
+      FROM {{ items }}
+      JOIN {{ orders }} ON {{ items }}.order_id = {{ orders }}.id
+      WHERE {{ orders }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ orders }}.created_at >= :start_time
+        AND {{ orders }}.created_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ items }}.product_name, {{ items }}.category
+      ORDER BY sales_count DESC
+      LIMIT :limit
+
+channel_sales:
+  name: 渠道销售额
+  description: 按流量渠道统计的销售额
+  allowed_dimensions:
+    - date
+    - source_channel
+  default_dimension: source_channel
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - ecom_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [gmv]
+      labels:
+        gmv: 销售额 (元)
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [gmv]
+      labels:
+        gmv: 销售额 (元)
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        SUM({{ table }}.pay_amount) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        {{ table }}.source_channel AS channel,
+        SUM({{ table }}.pay_amount) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.source_channel
+      ORDER BY gmv DESC
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        SUM({{ table }}.pay_amount) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY gmv DESC
+      LIMIT :limit
+
+new_users:
+  name: 新增用户数
+  description: 新注册用户数量统计
+  allowed_dimensions:
+    - date
+    - register_channel
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - ecom_users
+  sensitive_fields:
+    - phone
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [new_user_count]
+      labels:
+        new_user_count: 新增用户数
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [new_user_count]
+      labels:
+        new_user_count: 新增用户数
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        COUNT(*) AS new_user_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS new_user_count
+      FROM {{ table }}
+      WHERE created_at >= :start_time
+        AND created_at < :end_time
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ table }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS new_user_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ table }}.{{ dimension }}
+      ORDER BY new_user_count DESC
+      LIMIT :limit
+
+pay_user_count:
+  name: 支付用户数
+  description: 有支付行为的用户数量
+  allowed_dimensions:
+    - date
+  default_dimension: date
+  max_time_range_days: 90
+  allowed_query_types:
+    - fact
+    - trend
+  roles:
+    - admin
+    - operator
+  permitted_tables:
+    - ecom_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [pay_user_count]
+      labels:
+        pay_user_count: 支付用户数
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ table }}.created_at) AS {{ dimension }},
+        COUNT(DISTINCT {{ table }}.user_id) AS pay_user_count,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.status IN ('paid', 'shipped', 'completed')
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(DISTINCT user_id) AS pay_user_count,
+        COUNT(*) AS order_count
+      FROM {{ table }}
+      WHERE created_at >= :start_time
+        AND created_at < :end_time
+        AND status IN ('paid', 'shipped', 'completed')
+        AND workspace_id = :workspace_id
+      LIMIT :limit
