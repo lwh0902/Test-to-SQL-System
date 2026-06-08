@@ -78,6 +78,7 @@ def run_anomaly_breakdown(
     metric: str = "scan_success_rate",
     days: int = 14,
     workspace_id: str = "default",
+    space_id: str = "",
 ) -> dict:
     config = ANOMALY_CONFIGS.get(metric, ANOMALY_CONFIGS["scan_success_rate"])
 
@@ -89,8 +90,15 @@ def run_anomaly_breakdown(
         "limit": 1000,
     }
 
+    if space_id:
+        from app.core.engine_registry import engine_registry
+        eng = engine_registry.get_engine(space_id)
+    else:
+        from app.core.database import engine
+        eng = engine
+
     # 1. 查趋势
-    with engine.connect() as conn:
+    with eng.connect() as conn:
         trend_result = conn.execute(text(config["trend_sql"]), params)
         trend_rows = [_row_to_dict(r, trend_result.keys()) for r in trend_result.fetchall()]
 
@@ -121,7 +129,7 @@ def run_anomaly_breakdown(
 
     # 3. 对异常日期做多维拆解
     breakdowns = {}
-    with engine.connect() as conn:
+    with eng.connect() as conn:
         for dim_name, dim_sql in config.get("breakdown_queries", {}).items():
             dim_result = conn.execute(text(dim_sql), {
                 "target_date": str(drop_date),

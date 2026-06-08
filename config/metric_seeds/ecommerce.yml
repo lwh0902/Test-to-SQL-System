@@ -166,8 +166,22 @@ order_count:
       GROUP BY {{ table }}.{{ dimension }}
       ORDER BY order_count DESC
       LIMIT :limit
-
-avg_order_value:
+    comparison: >
+      SELECT
+        CASE
+          WHEN {{ table }}.created_at >= :prev_start_time AND {{ table }}.created_at < :start_time THEN '对比期'
+          ELSE '当期'
+        END AS period,
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN {{ table }}.status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+        SUM(CASE WHEN {{ table }}.status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :prev_start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY period
+      ORDER BY period ASC
+      LIMIT :limit
   name: 客单价
   description: 平均每笔订单的支付金额
   allowed_dimensions:

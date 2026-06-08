@@ -92,8 +92,21 @@ scan_success_rate:
       GROUP BY {{ table }}.{{ dimension }}
       ORDER BY total_count DESC
       LIMIT :limit
-
-scan_count:
+    comparison: >
+      SELECT
+        CASE
+          WHEN {{ table }}.created_at >= :prev_start_time AND {{ table }}.created_at < :start_time THEN '对比期'
+          ELSE '当期'
+        END AS period,
+        ROUND(SUM(CASE WHEN {{ table }}.status = 'success' THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS success_rate,
+        COUNT(*) AS total_count
+      FROM {{ table }}
+      WHERE {{ table }}.created_at >= :prev_start_time
+        AND {{ table }}.created_at < :end_time
+        AND {{ table }}.workspace_id = :workspace_id
+      GROUP BY period
+      ORDER BY period ASC
+      LIMIT :limit
   name: 扫描次数
   description: 扫描次数统计
   allowed_dimensions:

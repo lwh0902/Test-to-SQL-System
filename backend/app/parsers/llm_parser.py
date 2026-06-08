@@ -121,13 +121,13 @@ def parse_with_llm(question: str, space_id: str = "tech_quality") -> QueryIntent
             confidence=parsed.get("confidence", 0.5),
             clarification_reason=parsed.get("clarification_reason") or None,
         )
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         return QueryIntent(
             confidence=0.0,
-            clarification_reason=f"JSON 解析失败: {str(e)}",
+            clarification_reason="意图解析失败，请换种方式描述您的问题",
         )
-    except Exception as e:
+    except Exception:
         return QueryIntent(
             confidence=0.0,
-            clarification_reason=f"LLM 调用失败: {str(e)}",
+            clarification_reason="AI 服务暂时不可用，请稍后再试",
         )

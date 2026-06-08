@@ -1,4 +1,4 @@
-import { Typography, Collapse, Tag } from 'antd';
+import { Typography, Tag } from 'antd';
 import {
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -41,6 +41,7 @@ export default function TracePanel({ trace, loading }: Props) {
 
           const outputEntries = Object.entries(step.output || {});
           const hasOutput = outputEntries.length > 0;
+          const deniedMessage = typeof step.output?.message === 'string' ? step.output.message : '';
 
           return (
             <div key={i}>
@@ -56,9 +57,9 @@ export default function TracePanel({ trace, loading }: Props) {
                 {isDone && <Tag color="success" style={{ marginLeft: 4 }}>通过</Tag>}
                 {isDenied && <Tag color="error" style={{ marginLeft: 4 }}>拒绝</Tag>}
               </div>
-              {isDenied && step.output?.message && (
+              {isDenied && deniedMessage && (
                 <div style={{ marginLeft: 24, marginTop: 2, fontSize: 12, color: '#ff4d4f' }}>
-                  {String(step.output.message)}
+                  {deniedMessage}
                 </div>
               )}
               {hasOutput && !isDenied && (

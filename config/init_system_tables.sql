@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     user_id BIGINT NOT NULL COMMENT '用户 ID',
     space_id VARCHAR(64) NOT NULL COMMENT '分析空间',
     title VARCHAR(255) NOT NULL DEFAULT '新对话' COMMENT '会话标题（取首条消息）',
+    working_memory JSON DEFAULT NULL COMMENT '工作记忆（上次查询的指标/时间范围等）',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_user (user_id),

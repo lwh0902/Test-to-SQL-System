@@ -1,4 +1,4 @@
-export const CHAT_RESPONSE_TYPES = ['answer', 'clarification', 'error'] as const;
+export const CHAT_RESPONSE_TYPES = ['answer', 'clarification', 'error', 'chat', 'help', 'schema_help', 'data_map'] as const;
 
 export interface TimeRange {
   start: string;
@@ -30,7 +30,7 @@ export interface MetricCandidate {
 }
 
 export interface ChatResponse {
-  type: 'answer' | 'clarification' | 'error';
+  type: 'answer' | 'clarification' | 'error' | 'chat' | 'help' | 'schema_help' | 'data_map';
   trace_id: string;
   answer: string | null;
   intent: QueryIntent | null;
@@ -43,16 +43,40 @@ export interface ChatResponse {
   candidates: MetricCandidate[];
   plan?: PlanStep[];
   plan_results?: PlanResult[];
+  data_map?: import('../services/api').DataMap;
+  db_identity?: DbIdentity;
+}
+
+export interface DbIdentity {
+  space_id: string;
+  space_name: string;
+  space_description: string;
+  is_preset: boolean;
+  table_count: number;
+  connection?: {
+    db_type: string;
+    host_masked: string;
+    port: number;
+    db_name: string;
+    last_tested_at: string | null;
+  };
 }
 
 export interface PlanStep {
-  question: string;
+  id?: string;
+  title?: string;
+  question?: string;
   metric: string;
   query_type: string;
+  time_range?: TimeRange;
+  dimensions?: string[];
+  purpose?: string;
 }
 
 export interface PlanResult {
+  step_id?: string;
   step: number;
+  title?: string;
   question: string;
   metric: string;
   rows?: Record<string, unknown>[];
@@ -60,6 +84,19 @@ export interface PlanResult {
   chart?: ChartConfig;
   sql?: string;
   error?: string;
+}
+
+export interface PlanProgressStep {
+  id: string;
+  title: string;
+  status: 'pending' | 'running' | 'done';
+  rows?: number;
+}
+
+export interface PlanProgress {
+  goal: string;
+  steps: PlanProgressStep[];
+  phase: 'planning' | 'executing' | 'summarizing' | 'done';
 }
 
 export interface ChartConfig {

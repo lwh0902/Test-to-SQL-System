@@ -17,6 +17,8 @@ import sqlglot
 from sqlglot import exp
 
 
+SENSITIVE_FIELD_PATTERNS = {"phone", "mobile", "email", "id_card", "password", "secret", "token", "credit_card"}
+
 DANGEROUS_FUNCTIONS = {"LOAD_FILE", "BENCHMARK", "SLEEP"}
 DANGEROUS_STATEMENTS = {
     exp.Insert, exp.Update, exp.Delete, exp.Drop,
@@ -30,6 +32,87 @@ class GuardResult:
     code: str | None = None
     message: str | None = None
     detail: str | None = None
+
+
+class FreeformSQLGuard:
+    """自由模式 SQL 守卫 — 用于用户空间（无预定义指标模板）
+
+    通用安全规则（不限制表名）：
+    1. 只允许 SELECT
+    2. 禁止多语句
+    3. 禁止 SELECT *
+    4. 禁止 DDL/DML
+    5. 必须 LIMIT（自动追加，最大 500）
+    6. 禁止危险函数
+    7. 禁止敏感字段（phone/password/id_card 等）
+    8. 大表无 WHERE 拦截
+    """
+
+    MAX_LIMIT = 500
+
+    def check(self, sql: str) -> GuardResult:
+        try:
+            statements = sqlglot.parse(sql, dialect="mysql")
+        except sqlglot.errors.ParseError as e:
+            return GuardResult(False, "PARSE_ERROR", "SQL 解析失败", str(e))
+
+        statements = [s for s in statements if s is not None]
+        if len(statements) > 1:
+            return GuardResult(False, "MULTI_STATEMENT", "禁止多语句执行")
+        if len(statements) == 0:
+            return GuardResult(False, "EMPTY_SQL", "SQL 为空")
+
+        stmt = statements[0]
+
+        if not isinstance(stmt, exp.Select):
+            if any(isinstance(stmt, t) for t in DANGEROUS_STATEMENTS):
+                return GuardResult(False, "DANGEROUS_OPERATION", f"禁止执行 {type(stmt).__name__} 操作")
+            return GuardResult(False, "NOT_SELECT", "只允许 SELECT 查询")
+
+        has_where = bool(stmt.find(exp.Where))
+
+        for node in stmt.walk():
+            if isinstance(node, exp.Anonymous) and node.name.upper() in DANGEROUS_FUNCTIONS:
+                return GuardResult(False, "DANGEROUS_FUNCTION", f"禁止使用函数 {node.name.upper()}")
+
+            if isinstance(node, exp.Column):
+                col_name = node.name.lower()
+                if col_name in SENSITIVE_FIELD_PATTERNS:
+                    return GuardResult(False, "SENSITIVE_FIELD_DENIED", f"禁止访问敏感字段: {col_name}")
+
+        if self._has_select_star(stmt):
+            return GuardResult(False, "SELECT_STAR_DENIED", "禁止 SELECT *，请明确列出查询字段")
+
+        if not has_where and not stmt.find(exp.Limit):
+            return GuardResult(False, "NO_WHERE_NO_LIMIT", "查询缺少 WHERE 条件且无 LIMIT，可能扫描全表")
+
+        return GuardResult(True)
+
+    def ensure_limit(self, sql: str) -> str:
+        """如果 SQL 没有 LIMIT，自动追加"""
+        try:
+            statements = sqlglot.parse(sql, dialect="mysql")
+            stmt = [s for s in statements if s is not None][0]
+            if isinstance(stmt, exp.Select) and not stmt.find(exp.Limit):
+                return f"{sql.rstrip(';')} LIMIT {self.MAX_LIMIT}"
+        except Exception:
+            pass
+        return sql
+
+    def _has_select_star(self, stmt: exp.Select) -> bool:
+        for select_expr in stmt.expressions:
+            if isinstance(select_expr, exp.Star):
+                return True
+            inner = select_expr
+            if isinstance(inner, exp.Alias):
+                inner = inner.this
+            if isinstance(inner, (exp.Count, exp.Sum, exp.Avg, exp.Min, exp.Max)):
+                continue
+            if isinstance(inner, exp.Star):
+                return True
+            if isinstance(inner, exp.Column) and isinstance(inner.this, exp.Star):
+                return True
+        return False
 
 
 class SQLGuard:

@@ -3,14 +3,15 @@
 import os
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 
 from app.models.schemas import ChatRequest, ChatResponse, TraceStep, QueryIntent, ChartConfig
-from app.services.agent import build_graph, AgentState
+from app.services.agent import get_graph, AgentState
 from app.services.persistence import save_message, save_trace
 from app.services.trace_store import trace_store
+from app.core.auth import get_current_user
 from app.core.database import engine
 
 router = APIRouter()
@@ -19,7 +20,7 @@ router = APIRouter()
 # ======== Trace API ========
 
 @router.get("/api/traces/{trace_id}")
-def get_trace(trace_id: str):
+def get_trace(trace_id: str, user: dict = Depends(get_current_user)):
     data = trace_store.get(trace_id)
     if not data:
         with engine.connect() as conn:
@@ -47,7 +48,7 @@ def get_trace(trace_id: str):
 
 
 @router.get("/api/traces")
-def list_traces(limit: int = 20):
+def list_traces(limit: int = 20, user: dict = Depends(get_current_user)):
     with engine.connect() as conn:
         result = conn.execute(text(
             "SELECT trace_id, question, status, rows_count, created_at FROM traces ORDER BY created_at DESC LIMIT :lim"
@@ -62,27 +63,49 @@ def list_traces(limit: int = 20):
     return {"traces": traces}
 
 
-# ======== SSE 流式接口（LangGraph） ========
+# ======== SSE 流式接口（LangGraph） — 异步 ========
+
+_async_llm_client = None
+
+
+def _get_async_llm_client():
+    global _async_llm_client
+    if _async_llm_client is None:
+        from anthropic import AsyncAnthropic
+        _async_llm_client = AsyncAnthropic(
+            api_key=os.getenv("LLM_API_KEY"),
+            base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic"),
+        )
+    return _async_llm_client
+
+
+def _should_generate_analysis_answer(response_type: str, has_data: bool, has_plan: bool) -> bool:
+    """Only metric/data query answers should get the analysis-summary pass."""
+    return not has_plan and response_type == "answer"
+
 
 @router.post("/api/chat/stream")
-def chat_stream(req: ChatRequest):
-    graph = build_graph()
+async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
+    graph = get_graph()
+
+    user_role = user.get("role", "tester")
+    user_id = user.get("user_id", 1)
 
     initial_state = AgentState(
         question=req.question,
-        user_role=req.user_role,
+        user_role=user_role,
         workspace_id=req.workspace_id,
         space_id=req.space_id,
-        user_id=req.user_id,
+        user_id=user_id,
         session_id=req.session_id,
         selected_metric=req.selected_metric,
         selected_query_type=req.selected_query_type,
     )
 
-    def event_generator():
+    async def event_generator():
         accumulated: dict = {}
         sent_count = 0
-        for output in graph.stream(initial_state):
+        async for output in graph.astream(initial_state):
             for node_name, node_output in output.items():
                 if not node_output:
                     continue
@@ -93,19 +116,32 @@ def chat_stream(req: ChatRequest):
                     yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'], ensure_ascii=False)}\n\n"
                 sent_count = len(events)
 
-        # 如果有数据结果且 plan 没有生成过回答，用 LLM 流式生成回答
         has_plan = bool(accumulated.get("plan"))
-        has_data = (accumulated.get("response_type") == "answer"
-                    and accumulated.get("rows") and len(accumulated.get("rows", [])) > 0)
+        response_type = accumulated.get("response_type", "answer")
+        has_data = response_type == "answer" and bool(accumulated.get("rows"))
         answer_text = ""
 
-        if has_data and not has_plan:
+        # 加载历史上下文用于回答生成
+        history_lines = []
+        if req.session_id:
+            from app.services.persistence import load_recent_messages
+            history = load_recent_messages(req.session_id, limit=6)
+            for msg in history:
+                role_label = "用户" if msg["role"] == "user" else "AI"
+                line = f"{role_label}: {msg['content']}"
+                if msg["role"] == "assistant" and msg.get("meta"):
+                    meta = msg["meta"]
+                    if isinstance(meta, str):
+                        import json as _json
+                        meta = _json.loads(meta)
+                    rows_count = meta.get("rows_count", 0)
+                    if meta.get("sql"):
+                        line += f" (执行了SQL，返回{rows_count}条数据)"
+                history_lines.append(line)
+
+        if _should_generate_analysis_answer(response_type, has_data, has_plan):
             try:
-                from anthropic import Anthropic
-                client = Anthropic(
-                    api_key=os.getenv("LLM_API_KEY"),
-                    base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic"),
-                )
+                client = _get_async_llm_client()
 
                 intent = accumulated.get("intent")
                 metric_name = ""
@@ -119,41 +155,37 @@ def chat_stream(req: ChatRequest):
                 columns = accumulated.get("columns", [])
                 data_summary = ""
                 if rows and columns:
-                    # 只传前 5 行给 LLM，避免 token 过多
                     preview_rows = rows[:5]
                     data_summary = "数据列: " + ", ".join(columns) + "\n"
                     for i, row in enumerate(preview_rows):
                         data_summary += f"第{i+1}行: " + ", ".join(f"{c}={row.get(c)}" for c in columns) + "\n"
                     if len(rows) > 5:
                         data_summary += f"...共 {len(rows)} 行\n"
+                elif columns:
+                    data_summary = f"查询执行成功，列: {', '.join(columns)}，但返回了 0 条数据。\n"
 
-                prompt = (
-                    f"你是 DataPilot Agent 数据分析助手。用户查询了指标 '{metric_name}'，查询结果如下：\n\n"
-                    f"{data_summary}\n"
-                    f"请用简洁的中文总结查询结果（2-3句话），包含关键数字和趋势。不要重复原始数据。"
-                )
+                prompt = f"你是 DataPilot Agent 数据分析助手。\n\n"
+                if history_lines:
+                    prompt += "历史对话:\n" + "\n".join(history_lines) + "\n\n"
+                prompt += f"用户当前查询了指标 '{metric_name}'，查询结果如下：\n\n"
+                prompt += f"{data_summary}\n"
+                if not rows:
+                    prompt += "查询返回了 0 条数据。请结合用户的问题和历史对话，分析可能的原因（如时间范围内无数据、筛选条件过严等），并给出建议。2-3句话即可。\n"
+                else:
+                    prompt += "请用简洁的中文总结查询结果（2-3句话），包含关键数字和趋势。不要重复原始数据。"
 
-                stream = client.messages.create(
+                yield f"event: answer_generating\ndata: {json.dumps({'text': '正在生成分析结论'}, ensure_ascii=False)}\n\n"
+
+                async with client.messages.stream(
                     model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
                     max_tokens=256,
                     messages=[{"role": "user", "content": prompt}],
-                    stream=True,
-                )
-
-                for event in stream:
-                    if event.type == "content_block_delta" and hasattr(event, "delta"):
-                        chunk = event.delta.text if hasattr(event.delta, "text") else ""
-                        if chunk:
-                            answer_text += chunk
-                            yield f"event: answer_chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+                ) as stream:
+                    async for text in stream.text_stream:
+                        answer_text += text
+                        yield f"event: answer_chunk\ndata: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
             except Exception:
-                # LLM 失败就用 query_executor 的基础回答
                 answer_text = accumulated.get("message", "")
-        elif has_plan:
-            # Plan-and-Execute: summary_agent 已生成 message，按 chunk 流式发出
-            answer_text = accumulated.get("message", "")
-            if answer_text:
-                yield f"event: answer_chunk\ndata: {json.dumps({'text': answer_text}, ensure_ascii=False)}\n\n"
         else:
             answer_text = accumulated.get("message", "")
 
@@ -171,6 +203,17 @@ def chat_stream(req: ChatRequest):
             "plan": accumulated.get("plan"),
             "plan_results": accumulated.get("plan_results"),
         }
+
+        # data_map 类型：从 trace 中提取结构化数据
+        if accumulated.get("response_type") == "data_map":
+            for step in (accumulated.get("trace") or []):
+                if step.get("node") == "schema_help_responder" and step.get("output"):
+                    output = step["output"]
+                    if output.get("data_map"):
+                        complete_data["data_map"] = output["data_map"]
+                    if output.get("db_identity"):
+                        complete_data["db_identity"] = output["db_identity"]
+                    break
         intent = accumulated.get("intent")
         if intent:
             if isinstance(intent, QueryIntent):
@@ -190,26 +233,28 @@ def chat_stream(req: ChatRequest):
     )
 
 
-# ======== JSON 接口（复用同一 graph） ========
+# ======== JSON 接口 ========
 
 @router.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
-    graph = build_graph()
+async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
+    graph = get_graph()
+
+    user_role = user.get("role", "tester")
+    user_id = user.get("user_id", 1)
 
     initial_state = AgentState(
         question=req.question,
-        user_role=req.user_role,
+        user_role=user_role,
         workspace_id=req.workspace_id,
         space_id=req.space_id,
-        user_id=req.user_id,
+        user_id=user_id,
         session_id=req.session_id,
         selected_metric=req.selected_metric,
         selected_query_type=req.selected_query_type,
     )
 
-    result = graph.invoke(initial_state)
+    result = await graph.ainvoke(initial_state)
 
-    # graph.invoke 返回 dict，提取字段构造 ChatResponse
     intent = result.get("intent")
     intent_obj = None
     if intent:

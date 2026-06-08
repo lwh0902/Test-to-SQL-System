@@ -1,6 +1,7 @@
 """指标服务 - 从数据库按空间加载指标配置，渲染 SQL 模板"""
 
 import json
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from jinja2 import Template
@@ -77,10 +78,10 @@ def render_sql(intent: QueryIntent, metric_config: dict, workspace_id: str = "de
     query_type = intent.query_type or "fact"
     templates = metric_config["sql_templates"]
 
-    # comparison 用 trend 模板，但需要两组时间参数
+    # comparison: 有专用模板用专用模板，否则用 trend
     effective_type = query_type
     if query_type == "comparison":
-        effective_type = "trend" if "trend" in templates else "fact"
+        effective_type = "comparison" if "comparison" in templates else ("trend" if "trend" in templates else "fact")
 
     if effective_type not in templates:
         effective_type = "fact"
@@ -118,8 +119,13 @@ def render_sql(intent: QueryIntent, metric_config: dict, workspace_id: str = "de
     sql = template.render(**render_ctx)
 
     # 构建参数绑定
-    start_time = intent.time_range.start if intent.time_range else "2024-01-01"
-    end_time = intent.time_range.end if intent.time_range else "2024-12-31"
+    now = datetime.now()
+    if intent.time_range:
+        start_time = intent.time_range.start
+        end_time = intent.time_range.end
+    else:
+        start_time = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        end_time = now.strftime("%Y-%m-%d")
 
     params: dict = {
         "start_time": start_time,
@@ -130,7 +136,6 @@ def render_sql(intent: QueryIntent, metric_config: dict, workspace_id: str = "de
 
     # comparison 时增加对比期参数
     if query_type == "comparison" and intent.time_range:
-        from datetime import datetime, timedelta
         try:
             start_dt = datetime.strptime(start_time, "%Y-%m-%d")
             end_dt = datetime.strptime(end_time, "%Y-%m-%d")

@@ -1,3 +1,5 @@
+"""数据库引擎 - 同步"""
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 

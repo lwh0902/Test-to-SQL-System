@@ -19,7 +19,7 @@ def load_recent_messages(session_id: str | None, limit: int = 6) -> list[dict]:
         result = conn.execute(text("""
             SELECT role, content, meta FROM chat_messages
             WHERE session_id = :sid
-            ORDER BY created_at DESC LIMIT :lim
+            ORDER BY seq DESC LIMIT :lim
         """), {"sid": session_id, "lim": limit})
         messages = []
         for r in reversed(list(result)):  # 按时间正序返回
@@ -151,6 +151,26 @@ def save_trace(
         conn.commit()
 
 
+def _calc_result_status(state) -> str:
+    """计算上一轮查询的结果状态"""
+    if state.response_type == "error":
+        return "error"
+    if state.response_type == "clarification":
+        return "clarification"
+    if len(state.rows) == 0:
+        return "no_data"
+    return "success"
+
+
+def _extract_target(state) -> str | None:
+    """从 state 提取操作目标（指标名或表名）"""
+    if getattr(state, "table_target", None):
+        return state.table_target
+    if state.intent and state.intent.metric:
+        return state.intent.metric
+    return None
+
+
 def persist_from_agent_state(state):
     """从 AgentState 保存完整的消息和 trace（persister 节点调用）"""
     from app.services.trace_store import trace_store
@@ -176,6 +196,17 @@ def persist_from_agent_state(state):
         meta["candidates"] = state.candidates
     if state.intent:
         meta["intent"] = state.intent.model_dump()
+
+    # data_map 类型：从 trace 中提取结构化数据
+    if state.response_type == "data_map":
+        for step in state.trace:
+            if step.get("node") == "schema_help_responder" and step.get("output"):
+                output = step["output"]
+                if output.get("data_map"):
+                    meta["data_map"] = output["data_map"]
+                if output.get("db_identity"):
+                    meta["db_identity"] = output["db_identity"]
+                break
 
     # 3. 保存 assistant 消息
     save_message(session_id, "assistant", state.message, meta)
@@ -207,19 +238,31 @@ def persist_from_agent_state(state):
         "sql": state.sql, "rows_count": len(state.rows),
     })
 
-    # 6. 更新 working_memory（结构化，不调 LLM）
-    if state.intent and state.response_type == "answer":
+    # 6. 更新 working_memory（任务帧）
+    if state.response_type in ("answer", "chat", "schema_help", "data_map"):
         new_memory = {}
-        # 保留已有的偏好
         if state.working_memory:
             new_memory.update(state.working_memory)
-        # 用当前 intent 覆盖
-        new_memory["last_metric"] = state.intent.metric
-        new_memory["last_query_type"] = state.intent.query_type
-        if state.intent.time_range:
-            new_memory["last_time_range"] = state.intent.time_range.model_dump()
-        new_memory["last_dimensions"] = state.intent.dimensions
-        new_memory["last_filters"] = state.intent.filters
+
+        # 只有查询型 answer 才覆盖 frame，说明类 answer 保留上一轮 frame
+        if state.response_type == "answer" and state.route not in ("database_profile",):
+            new_memory["last_route"] = state.route
+            new_memory["last_target"] = _extract_target(state)
+            new_memory["last_target_type"] = "table" if getattr(state, "table_target", None) else "metric"
+            new_memory["last_sql"] = state.sql
+            new_memory["last_params"] = state.params
+            new_memory["last_result_status"] = _calc_result_status(state)
+            new_memory["last_rows_count"] = len(state.rows)
+            new_memory["last_response_type"] = state.response_type
+            new_memory["last_error"] = state.error_code or None
+            if state.intent:
+                new_memory["last_metric"] = state.intent.metric
+                new_memory["last_query_type"] = state.intent.query_type
+                if state.intent.time_range:
+                    new_memory["last_time_range"] = state.intent.time_range.model_dump()
+                new_memory["last_dimensions"] = state.intent.dimensions
+                new_memory["last_filters"] = state.intent.filters
+
         update_working_memory(session_id, new_memory)
 
     # 7. 自动生成 session 标题

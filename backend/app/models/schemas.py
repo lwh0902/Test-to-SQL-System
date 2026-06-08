@@ -23,8 +23,6 @@ class ChatRequest(BaseModel):
     space_id: str = "tech_quality"
     session_id: str | None = None
     workspace_id: str = "default"
-    user_id: int = 1
-    user_role: str = "tester"
     selected_metric: str | None = None
     selected_query_type: str | None = None
 
