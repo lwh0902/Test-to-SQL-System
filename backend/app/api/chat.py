@@ -13,6 +13,9 @@ from app.services.persistence import save_message, save_trace
 from app.services.trace_store import trace_store
 from app.core.auth import get_current_user
 from app.core.database import engine
+from app.services.authorization_service import require_space_access, require_session_access, require_trace_access
+from app.core.rate_limit import limiter
+from fastapi import Request
 
 router = APIRouter()
 
@@ -21,6 +24,7 @@ router = APIRouter()
 
 @router.get("/api/traces/{trace_id}")
 def get_trace(trace_id: str, user: dict = Depends(get_current_user)):
+    require_trace_access(trace_id, user["user_id"])
     data = trace_store.get(trace_id)
     if not data:
         with engine.connect() as conn:
@@ -51,15 +55,15 @@ def get_trace(trace_id: str, user: dict = Depends(get_current_user)):
 def list_traces(limit: int = 20, user: dict = Depends(get_current_user)):
     with engine.connect() as conn:
         result = conn.execute(text(
-            "SELECT trace_id, question, status, rows_count, created_at FROM traces ORDER BY created_at DESC LIMIT :lim"
-        ), {"lim": limit})
+            "SELECT trace_id, question, status, rows_count, created_at FROM traces WHERE user_id = :user_id ORDER BY created_at DESC LIMIT :lim"
+        ), {"lim": limit, "user_id": user["user_id"]})
         traces = [
             {"trace_id": r[0], "question": r[1], "status": r[2],
              "rows_count": r[3], "created_at": str(r[4])}
             for r in result.fetchall()
         ]
     if not traces:
-        return {"traces": trace_store.list_recent(limit)}
+        return {"traces": trace_store.list_recent(limit, user["user_id"])}
     return {"traces": traces}
 
 
@@ -85,7 +89,10 @@ def _should_generate_analysis_answer(response_type: str, has_data: bool, has_pla
 
 
 @router.post("/api/chat/stream")
-async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def chat_stream(request: Request, req: ChatRequest, user: dict = Depends(get_current_user)):
+    require_space_access(req.space_id, user["user_id"])
+    require_session_access(req.session_id, user["user_id"], req.space_id)
     graph = get_graph()
 
     user_role = user.get("role", "tester")
@@ -125,7 +132,7 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
         history_lines = []
         if req.session_id:
             from app.services.persistence import load_recent_messages
-            history = load_recent_messages(req.session_id, limit=6)
+            history = load_recent_messages(req.session_id, limit=6, user_id=user_id, space_id=req.space_id)
             for msg in history:
                 role_label = "用户" if msg["role"] == "user" else "AI"
                 line = f"{role_label}: {msg['content']}"
@@ -236,7 +243,10 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(get_current_user)):
 # ======== JSON 接口 ========
 
 @router.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, user: dict = Depends(get_current_user)):
+@limiter.limit("30/minute")
+async def chat(request: Request, req: ChatRequest, user: dict = Depends(get_current_user)):
+    require_space_access(req.space_id, user["user_id"])
+    require_session_access(req.session_id, user["user_id"], req.space_id)
     graph = get_graph()
 
     user_role = user.get("role", "tester")

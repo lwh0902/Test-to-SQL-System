@@ -73,13 +73,15 @@ export default function TraceDetailModal({ open, onClose, traceId, steps = [], q
                   <pre
                     style={{
                       fontSize: 11,
-                      background: '#f5f5f5',
+                      background: '#06030F',
+                      color: '#DCD8E8',
                       padding: 8,
                       borderRadius: 4,
                       marginTop: 4,
                       maxHeight: 120,
                       overflow: 'auto',
                       whiteSpace: 'pre-wrap',
+                      border: '1px solid rgba(255, 255, 255, 0.1)',
                     }}
                   >
                     {JSON.stringify(step.output, null, 2)}
@@ -99,12 +101,14 @@ export default function TraceDetailModal({ open, onClose, traceId, steps = [], q
           <pre
             style={{
               fontSize: 12,
-              background: '#f5f5f5',
+              background: '#06030F',
+              color: '#DCD8E8',
               padding: 10,
               borderRadius: 4,
               maxHeight: 150,
               overflow: 'auto',
               whiteSpace: 'pre-wrap',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
             }}
           >
             {sql}

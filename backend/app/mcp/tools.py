@@ -2,25 +2,6 @@
 
 TOOLS = [
     {
-        "name": "execute_query",
-        "description": "在用户数据库上执行只读 SQL 查询，返回列名和行数据",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "sql": {
-                    "type": "string",
-                    "description": "SELECT SQL 语句，必须包含 LIMIT",
-                },
-                "params": {
-                    "type": "object",
-                    "description": "SQL 参数绑定（可选）",
-                    "additionalProperties": True,
-                },
-            },
-            "required": ["sql"],
-        },
-    },
-    {
         "name": "list_tables",
         "description": "列出用户数据库中的所有表",
         "inputSchema": {

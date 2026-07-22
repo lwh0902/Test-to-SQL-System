@@ -24,9 +24,6 @@ class MCPClient:
         """MCP tools/call"""
         return self._server.call_tool(tool_name, arguments or {})
 
-    def execute_query(self, sql: str, params: dict | None = None) -> dict:
-        return self.call_tool("execute_query", {"sql": sql, "params": params})
-
     def list_tables(self) -> list[str]:
         result = self.call_tool("list_tables")
         return result.get("tables", [])

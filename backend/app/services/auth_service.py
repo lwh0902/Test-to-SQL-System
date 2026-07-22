@@ -88,8 +88,9 @@ def validate_phone(phone: str) -> str | None:
     return None
 
 
-def create_user_by_phone(phone: str, password: str, display_name: str, role: str = "tester") -> dict:
+def create_user_by_phone(phone: str, password: str, display_name: str) -> dict:
     pw_hash = hash_password(password)
+    role = "tester"
     with engine.connect() as conn:
         conn.execute(text("""
             INSERT INTO auth_users (phone, password_hash, display_name, role)

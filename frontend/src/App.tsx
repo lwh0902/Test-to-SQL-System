@@ -30,28 +30,30 @@ import type { DataMap, DataMapQuestion, Space as SpaceInfo, Session } from './se
 
 import ChatMessage from './components/ChatMessage';
 import DataMapBlock from './components/DataMapBlock';
-import LoginModal from './components/LoginModal';
 import TraceDetailModal from './components/TraceDetailModal';
 import SpaceCreateModal from './components/SpaceCreateModal';
-import datapilotLogo from './assets/datapilot-logo.png';
+import Ferrofluid from '@/components/ui/ferrofluid';
+import GooeyNav from '@/components/ui/gooey-nav';
+import LoginPage from './pages/LoginPage';
 import datapilotAppIcon from './assets/datapilot-app-icon.png';
 
 const { Sider, Content } = Layout;
 const { Text } = Typography;
 
-const BRAND_INK = '#071113';
-const BRAND_PANEL = '#0B181A';
-const BRAND_CARD = '#102326';
-const BRAND_DEEP = '#0D3B3E';
-const BRAND_LIME = '#9BCB2D';
-const BRAND_BORDER = '#183235';
-const BRAND_MUTED = '#7D8B8E';
-const BRAND_TEXT = '#EEF4F2';
-const BRAND_SOFT = '#132B2E';
+const BRAND_INK_TEXT = '#FFFFFF';
+const BRAND_PANEL = 'rgba(8, 6, 16, 0.72)';
+const BRAND_CARD = 'rgba(255, 255, 255, 0.04)';
+const BRAND_DEEP = '#1A0F30';
+const BRAND_LIME = '#C079FF';
+const BRAND_BORDER = 'rgba(255, 255, 255, 0.08)';
+const BRAND_MUTED = '#9B97AD';
+const BRAND_TEXT = '#F4F4F8';
+const BRAND_SOFT = 'rgba(255, 255, 255, 0.06)';
+const GLASS_BLUR = 'blur(16px)';
 
 const SPACE_META: Record<string, { icon: React.ReactNode; color: string }> = {
   tech_quality: { icon: <BugOutlined />, color: BRAND_LIME },
-  ecommerce: { icon: <ShoppingCartOutlined />, color: '#6F8285' },
+  ecommerce: { icon: <ShoppingCartOutlined />, color: '#6E6A82' },
 };
 
 const EVENT_LABELS: Record<string, string> = {
@@ -81,7 +83,7 @@ function App() {
     const saved = localStorage.getItem('dp_user');
     return saved ? JSON.parse(saved) : null;
   });
-  const [loginOpen, setLoginOpen] = useState(false);
+  const [, setLoginOpen] = useState(false);
   const [spaceCreateOpen, setSpaceCreateOpen] = useState(false);
 
   const [spaces, setSpaces] = useState<SpaceInfo[]>([]);
@@ -415,23 +417,18 @@ function App() {
     } : undefined);
   };
   const activeSpace = spaces.find((s) => s.id === activeSpaceId);
-  const spaceMeta = SPACE_META[activeSpaceId] || { icon: <BarChartOutlined />, color: '#1890ff' };
+  const spaceMeta = SPACE_META[activeSpaceId] || { icon: <BarChartOutlined />, color: '#C079FF' };
 
   // ---- 侧边栏内容（PC 和移动端共用） ----
   const sidebarContent = (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
       {/* Brand */}
-      <div style={{ padding: '20px 20px 12px' }}>
-        <div style={{
-          display: 'flex', alignItems: 'center',
-          background: '#F7F8F6', borderRadius: 14, padding: '12px 16px',
-          boxShadow: '0 10px 28px rgba(0,0,0,0.18)',
-        }}>
-          <img
-            src={datapilotLogo}
-            alt="DataPilot AI 数据分析工作台"
-            style={{ width: 180, height: 'auto', display: 'block', objectFit: 'contain' }}
-          />
+      <div style={{ padding: '24px 20px 16px' }}>
+        <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-0.01em', color: '#F4F4F8' }}>
+          DataPilot Agent
+        </div>
+        <div style={{ fontSize: 11, color: '#9B97AD', marginTop: 4, letterSpacing: '0.05em' }}>
+          AI 数据分析工作台
         </div>
       </div>
 
@@ -442,12 +439,12 @@ function App() {
           style={{
             flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
             height: 40, borderRadius: 10, cursor: 'pointer',
-            background: BRAND_LIME, color: BRAND_INK,
+            background: BRAND_LIME, color: BRAND_INK_TEXT,
             fontSize: 14, fontWeight: 600,
             transition: 'all 0.2s',
-            boxShadow: '0 8px 22px rgba(155,203,45,0.18)',
+            boxShadow: '0 8px 22px rgba(255, 255, 255, 0.1)',
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = '#B0D94A'; }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = '#C079FF'; }}
           onMouseLeave={(e) => { e.currentTarget.style.background = BRAND_LIME; }}
         >
           <PlusOutlined style={{ fontSize: 14 }} />
@@ -458,10 +455,10 @@ function App() {
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             width: 40, height: 40, borderRadius: 10, cursor: 'pointer',
-            background: BRAND_CARD, color: '#A6B2B4',
+            background: BRAND_CARD, color: '#9B97AD',
             fontSize: 16, transition: 'all 0.2s',
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = '#173135'; }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
           onMouseLeave={(e) => { e.currentTarget.style.background = BRAND_CARD; }}
           title="创建空间（连接你的数据库）"
         >
@@ -471,42 +468,37 @@ function App() {
 
       <div style={{ height: 1, background: BRAND_BORDER, margin: '0 16px' }} />
 
-      {/* Space Switcher - 列表式 */}
-      <div style={{ padding: '12px 8px 4px' }}>
-        <div style={{ fontSize: 11, color: BRAND_MUTED, fontWeight: 600, marginBottom: 6, paddingLeft: 8, letterSpacing: '0.5px' }}>
+      {/* Space Switcher - GooeyNav */}
+      <div style={{ padding: '12px 12px 4px' }}>
+        <div style={{ fontSize: 11, color: BRAND_MUTED, fontWeight: 600, marginBottom: 8, paddingLeft: 4, letterSpacing: '0.5px' }}>
           分析空间
         </div>
-        {spaces.map((s) => {
-          const isActive = activeSpaceId === s.id;
-          return (
-            <div
-              key={s.id}
-              onClick={() => {
-                setActiveSpaceId(s.id);
-                localStorage.setItem('dp_space', s.id);
-                localStorage.removeItem('dp_session');
-                setActiveSessionId(null);
-                setMessages([]);
-                setDrawerOpen(false);
-              }}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '10px 12px', borderRadius: 6, cursor: 'pointer',
-                background: isActive ? BRAND_SOFT : 'transparent',
-                borderLeft: isActive ? `3px solid ${BRAND_LIME}` : '3px solid transparent',
-                transition: 'all 0.15s',
-                marginBottom: 2,
-              }}
-              onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = '#0F2023'; }}
-              onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
-            >
-              <span style={{ fontSize: 16, color: isActive ? BRAND_LIME : '#6F7D80' }}>{SPACE_META[s.id]?.icon}</span>
-              <span style={{ fontSize: 13, color: isActive ? BRAND_TEXT : '#839195', fontWeight: isActive ? 600 : 400 }}>
-                {s.name}
-              </span>
-            </div>
-          );
-        })}
+        {spaces.length > 0 && (
+          <GooeyNav
+            orientation="vertical"
+            items={spaces.map((s) => ({
+              label: s.name,
+              value: s.id,
+              icon: <span style={{ fontSize: 15 }}>{SPACE_META[s.id]?.icon ?? <BarChartOutlined />}</span>,
+            }))}
+            initialActiveIndex={Math.max(0, spaces.findIndex((s) => s.id === activeSpaceId))}
+            particleCount={12}
+            particleDistances={[60, 6]}
+            particleR={80}
+            animationTime={500}
+            timeVariance={250}
+            colors={[1, 2, 3, 1, 2, 4]}
+            onSelect={(item) => {
+              if (!item.value || item.value === activeSpaceId) return;
+              setActiveSpaceId(item.value);
+              localStorage.setItem('dp_space', item.value);
+              localStorage.removeItem('dp_session');
+              setActiveSessionId(null);
+              setMessages([]);
+              setDrawerOpen(false);
+            }}
+          />
+        )}
       </div>
 
       {/* Session List */}
@@ -517,7 +509,7 @@ function App() {
       </div>
       <div style={{ flex: 1, overflow: 'auto', padding: '0 8px 8px' }}>
         {sessions.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '24px 0', color: '#536164', fontSize: 13 }}>暂无会话</div>
+          <div style={{ textAlign: 'center', padding: '24px 0', color: '#6E6A82', fontSize: 13 }}>暂无会话</div>
         )}
         {sessions.map((s) => (
           <div
@@ -530,7 +522,7 @@ function App() {
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               transition: 'all 0.15s',
             }}
-            onMouseEnter={(e) => { if (activeSessionId !== s.id) e.currentTarget.style.background = '#0F2023'; }}
+            onMouseEnter={(e) => { if (activeSessionId !== s.id) e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)'; }}
             onMouseLeave={(e) => {
               if (activeSessionId !== s.id) {
                 e.currentTarget.style.background = 'transparent';
@@ -539,17 +531,17 @@ function App() {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden', flex: 1, minWidth: 0 }}>
-              <MessageOutlined style={{ color: activeSessionId === s.id ? BRAND_LIME : '#6F7D80', fontSize: 13, flexShrink: 0 }} />
+              <MessageOutlined style={{ color: activeSessionId === s.id ? BRAND_LIME : '#6E6A82', fontSize: 13, flexShrink: 0 }} />
               <div style={{ overflow: 'hidden' }}>
                 <div style={{
                   fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-                  color: activeSessionId === s.id ? BRAND_TEXT : '#839195',
+                  color: activeSessionId === s.id ? BRAND_TEXT : '#9B97AD',
                   fontWeight: activeSessionId === s.id ? 500 : 400,
                 }}>{s.title}</div>
-                <div style={{ fontSize: 11, color: '#536164' }}>{s.updated_at?.slice(5, 10)}</div>
+                <div style={{ fontSize: 11, color: '#6E6A82' }}>{s.updated_at?.slice(5, 10)}</div>
               </div>
             </div>
-            <DeleteOutlined style={{ color: '#405155', fontSize: 12, flexShrink: 0 }}
+            <DeleteOutlined style={{ color: '#48455A', fontSize: 12, flexShrink: 0 }}
               onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }} />
           </div>
         ))}
@@ -564,7 +556,7 @@ function App() {
                 width: 32, height: 32, borderRadius: '50%', background: BRAND_LIME,
                 display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
               }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: BRAND_INK }}>{user.display_name[0]}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: BRAND_INK_TEXT }}>{user.display_name[0]}</span>
               </div>
               <div style={{ overflow: 'hidden' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: BRAND_TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user.display_name}</div>
@@ -572,7 +564,7 @@ function App() {
               </div>
             </div>
             <Tooltip title="退出登录">
-              <LogoutOutlined style={{ color: '#819094', fontSize: 16, cursor: 'pointer' }}
+              <LogoutOutlined style={{ color: '#9B97AD', fontSize: 16, cursor: 'pointer' }}
                 onClick={handleLogout} />
             </Tooltip>
           </div>
@@ -585,7 +577,7 @@ function App() {
               background: BRAND_CARD, color: BRAND_TEXT,
               fontSize: 13, fontWeight: 500, transition: 'all 0.2s',
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = BRAND_LIME; e.currentTarget.style.color = BRAND_INK; }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = BRAND_LIME; e.currentTarget.style.color = BRAND_INK_TEXT; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = BRAND_CARD; e.currentTarget.style.color = BRAND_TEXT; }}
           >
             <LoginOutlined style={{ fontSize: 14 }} />
@@ -596,15 +588,39 @@ function App() {
     </div>
   );
 
+  if (!token) {
+    return <LoginPage onLogin={handleLogin} onRegister={handleRegister} />;
+  }
+
   return (
-    <Layout style={{ height: '100vh', overflow: 'hidden', background: BRAND_INK }}>
+    <>
+      <div className="pointer-events-none absolute inset-0 overflow-hidden" style={{ zIndex: 0, background: '#03010A' }}>
+        <Ferrofluid
+          colors={['#ffffff', '#DCD8E8', '#ffffff']}
+          speed={0.32}
+          scale={1.6}
+          turbulence={0.85}
+          fluidity={0.12}
+          rimWidth={0.2}
+          sharpness={3}
+          shimmer={1.1}
+          glow={1.4}
+          flowDirection="down"
+          opacity={0.55}
+          mouseInteraction={false}
+          mouseStrength={1}
+          mouseRadius={0.3}
+          dpr={Math.min(window.devicePixelRatio || 1, 1.5)}
+        />
+      </div>
+      <Layout style={{ height: '100vh', overflow: 'hidden', background: 'transparent', position: 'relative', zIndex: 1 }}>
       {/* PC 侧边栏 */}
       <Sider
         width={260}
         breakpoint="lg"
         collapsedWidth={0}
         onBreakpoint={(broken) => { if (!broken) setDrawerOpen(false); }}
-        style={{ background: BRAND_PANEL, borderRight: `1px solid ${BRAND_BORDER}`, overflow: 'hidden', padding: 0 }}
+        style={{ background: BRAND_PANEL, borderRight: `1px solid ${BRAND_BORDER}`, overflow: 'hidden', padding: 0, backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR }}
         className="desktop-sider"
       >
         {sidebarContent}
@@ -616,18 +632,19 @@ function App() {
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         width={280}
-        styles={{ body: { padding: 0, background: BRAND_PANEL } }}
+        styles={{ body: { padding: 0, background: BRAND_PANEL, backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR } }}
         className="mobile-drawer"
       >
         {sidebarContent}
       </Drawer>
 
       {/* 主区域 */}
-      <Layout style={{ background: BRAND_INK }}>
+      <Layout style={{ background: 'transparent' }}>
         {/* 顶栏 */}
         <div style={{
           height: 52, borderBottom: `1px solid ${BRAND_BORDER}`, display: 'flex',
           alignItems: 'center', padding: '0 16px', gap: 12,
+          background: 'rgba(7, 17, 19, 0.55)', backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
         }}>
           <Button type="text" icon={<MenuOutlined />} onClick={() => setDrawerOpen(true)}
             className="mobile-menu-btn" style={{ display: 'none', color: BRAND_TEXT }} />
@@ -644,14 +661,14 @@ function App() {
                 width: 28, height: 28, borderRadius: '50%', background: BRAND_LIME,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: BRAND_INK }}>{user.display_name[0]}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: BRAND_INK_TEXT }}>{user.display_name[0]}</span>
               </div>
             </div>
           )}
         </div>
 
         {/* 对话区 */}
-        <Content style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', background: BRAND_INK }}>
+        <Content style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', background: 'transparent' }}>
           <div style={{ maxWidth: 860, width: '100%', padding: '24px 20px' }}>
             {sessionLoading && (
               <div style={{ textAlign: 'center', padding: '60px 0' }}>
@@ -660,106 +677,68 @@ function App() {
             )}
 
             {!sessionLoading && messages.length === 0 && !loading && (
-              <div style={{ padding: '48px 0 32px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginBottom: 28 }}>
-                  <div style={{
-                    width: 72, height: 72, borderRadius: 20,
-                    background: 'rgba(13,59,62,0.32)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    boxShadow: '0 0 0 1px rgba(155,203,45,0.12), 0 18px 40px rgba(0,0,0,0.28)',
-                    flexShrink: 0,
-                  }}>
-                    <img src={datapilotAppIcon} alt="" style={{ width: 56, height: 56, borderRadius: 14, display: 'block' }} />
+              <div className="relative" style={{ padding: '24px 0 24px' }}>
+                <div style={{ marginBottom: 20, zIndex: 1 }}>
+                  <div style={{ fontSize: 28, fontWeight: 600, letterSpacing: '-0.02em', color: '#F4F4F8', marginBottom: 6, lineHeight: 1.2 }}>
+                    {activeSpace?.name || 'DataPilot 工作台'}
                   </div>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 28, fontWeight: 800, color: '#F4FAF7', marginBottom: 8 }}>
-                      {activeSpace?.name || 'DataPilot 工作台'}
-                    </div>
-                    <div style={{ fontSize: 15, color: '#8E9B9E', lineHeight: '22px' }}>
-                      我已识别这个空间的数据，下面这些问题可以直接开始分析。
-                    </div>
+                  <div style={{ fontSize: 13, color: '#9B97AD', lineHeight: '20px' }}>
+                    我已识别这个空间的数据，下面这些问题可以直接开始分析。
                   </div>
                 </div>
 
+                <div className="relative" style={{ zIndex: 1 }}>
                 {dataMapLoading && (
                   <div style={{
-                    border: `1px solid ${BRAND_BORDER}`, background: BRAND_PANEL, borderRadius: 16,
-                    padding: 24, color: BRAND_MUTED, display: 'flex', alignItems: 'center', gap: 10,
+                    border: `1px solid ${BRAND_BORDER}`, background: BRAND_PANEL, borderRadius: 12,
+                    padding: 16, color: BRAND_MUTED, display: 'flex', alignItems: 'center', gap: 10,
+                    backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
                   }}>
                     <Spin size="small" /> 正在读取数据地图...
                   </div>
                 )}
 
                 {!dataMapLoading && dataMap && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                     <div style={{
-                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 16,
-                      padding: 18,
+                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 12,
+                      padding: 14,
+                      backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
                     }}>
-                      <div style={{ marginBottom: 14 }}>
-                        <div style={{ color: BRAND_TEXT, fontSize: 18, fontWeight: 800, marginBottom: 6 }}>先从这些问题开始</div>
-                        <div style={{ color: BRAND_MUTED, fontSize: 13 }}>
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ color: BRAND_TEXT, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>先从这些问题开始</div>
+                        <div style={{ color: BRAND_MUTED, fontSize: 12 }}>
                           不需要知道表名或字段名，点一个问题就能开始分析。
                         </div>
                       </div>
-                      <DataMapBlock dataMap={{ ...dataMap, tables: [] }} onQuestionClick={handleQuestionClick} />
+                      <DataMapBlock dataMap={{ ...dataMap, tables: [] }} compact onQuestionClick={handleQuestionClick} />
                     </div>
 
                     <div style={{
-                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 16,
-                      padding: 18,
+                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 12,
+                      padding: 14,
+                      backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
                     }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
                         <div>
-                          <div style={{ color: BRAND_TEXT, fontSize: 18, fontWeight: 800, marginBottom: 6 }}>已识别的业务数据</div>
-                          <div style={{ color: BRAND_MUTED, fontSize: 13 }}>
-                            共识别 {dataMap.summary.table_count} 类数据、{dataMap.summary.metric_count} 个可直接分析的指标。
+                          <div style={{ color: BRAND_TEXT, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>已识别的业务数据</div>
+                          <div style={{ color: BRAND_MUTED, fontSize: 12 }}>
+                            共 {dataMap.summary.table_count} 类数据、{dataMap.summary.metric_count} 个指标
                           </div>
                         </div>
                         <button
                           type="button"
                           onClick={() => handleSend('现在数据库有什么表')}
                           style={{
-                            border: `1px solid #31595D`, background: 'transparent', color: '#D8E6E3',
-                            borderRadius: 18, padding: '7px 13px', cursor: 'pointer', fontSize: 12, flexShrink: 0,
+                            border: `1px solid rgba(255, 255, 255, 0.1)`, background: 'transparent', color: '#DCD8E8',
+                            borderRadius: 14, padding: '5px 11px', cursor: 'pointer', fontSize: 11, flexShrink: 0,
                           }}
                         >
                           让 AI 说明
                         </button>
                       </div>
-                      <DataMapBlock dataMap={{ ...dataMap, recommended_questions: [] }} onQuestionClick={handleQuestionClick} />
+                      <DataMapBlock dataMap={{ ...dataMap, recommended_questions: [] }} compact onQuestionClick={handleQuestionClick} />
                     </div>
-
-                    <details style={{
-                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 16,
-                      padding: 18, color: BRAND_TEXT,
-                    }}>
-                      <summary style={{ cursor: 'pointer', color: '#D8E6E3', fontSize: 15, fontWeight: 800 }}>
-                        底层表结构（可选）
-                      </summary>
-                      <div style={{ color: BRAND_MUTED, fontSize: 12, margin: '10px 0 14px' }}>
-                        这里展示给了解数据库结构的人；新手可以直接使用上面的推荐问题。
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {dataMap.tables.map((table) => (
-                          <div key={table.name} style={{ borderTop: `1px solid ${BRAND_BORDER}`, paddingTop: 10 }}>
-                            <div style={{ color: BRAND_TEXT, fontSize: 13, fontWeight: 700, marginBottom: 6 }}>
-                              {table.name}
-                            </div>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                              {table.columns.slice(0, 12).map((col) => (
-                                <span key={col.name} style={{
-                                  color: '#A9B7BA', border: '1px solid #294D51', borderRadius: 999,
-                                  padding: '2px 7px', fontSize: 11,
-                                }}>
-                                  {col.name}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
                   </div>
                 )}
 
@@ -767,10 +746,12 @@ function App() {
                   <div style={{
                     border: `1px solid ${BRAND_BORDER}`, background: BRAND_PANEL, borderRadius: 16,
                     padding: 24, color: BRAND_MUTED,
+                    backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
                   }}>
                     暂时无法读取数据地图。你仍然可以在下方直接提问，或重新创建空间刷新数据结构。
                   </div>
                 )}
+                </div>
               </div>
             )}
 
@@ -844,10 +825,10 @@ function App() {
                         </div>
                       )}
                       {planProgress.phase !== 'planning' && planProgress.steps.map((step, idx) => (
-                        <div key={step.id} style={{ padding: '3px 0', fontSize: 13, color: '#C4CECC', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div key={step.id} style={{ padding: '3px 0', fontSize: 13, color: '#B5B1C6', display: 'flex', alignItems: 'center', gap: 6 }}>
                           {step.status === 'done' && <span style={{ color: '#52c41a' }}>✓</span>}
                           {step.status === 'running' && <span style={{ color: BRAND_LIME }}><Spin size="small" /></span>}
-                          {step.status === 'pending' && <span style={{ color: '#526164' }}>{idx + 1}.</span>}
+                          {step.status === 'pending' && <span style={{ color: '#6E6A82' }}>{idx + 1}.</span>}
                           {step.status === 'done' && <span>{idx + 1}.</span>}
                           {' '}{step.title}
                           {step.status === 'done' && step.rows !== undefined && (
@@ -893,13 +874,14 @@ function App() {
         </Content>
 
         {/* 输入区 */}
-        <div style={{ background: BRAND_INK, padding: '20px 24px' }}>
+        <div style={{ background: 'transparent', padding: '20px 24px' }}>
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
             <div style={{
               display: 'flex', gap: 8, alignItems: 'flex-end',
               background: BRAND_PANEL, borderRadius: 24, padding: '6px 6px 6px 20px',
-              border: '1px solid #294D51', transition: 'border-color 0.2s',
+              border: '1px solid rgba(255, 255, 255, 0.1)', transition: 'border-color 0.2s',
               boxShadow: '0 18px 44px rgba(0,0,0,0.22)',
+              backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
             }}>
               <Input.TextArea
                 className="datapilot-input"
@@ -922,17 +904,16 @@ function App() {
               ) : (
                 <Button type="primary" shape="circle" icon={<SendOutlined />}
                   onClick={() => handleSend()} disabled={!inputValue.trim()}
-                  style={{ width: 40, height: 40, flexShrink: 0, background: BRAND_LIME, color: BRAND_INK, borderColor: BRAND_LIME, boxShadow: '0 2px 12px rgba(155,203,45,0.24)' }} />
+                  style={{ width: 40, height: 40, flexShrink: 0, background: BRAND_LIME, color: BRAND_INK_TEXT, borderColor: BRAND_LIME, boxShadow: '0 2px 12px rgba(192, 121, 255, 0.32)' }} />
               )}
             </div>
-            <div style={{ textAlign: 'center', marginTop: 8, fontSize: 11, color: '#526164' }}>
+            <div style={{ textAlign: 'center', marginTop: 8, fontSize: 11, color: '#6E6A82' }}>
               DataPilot 可能会犯错，请核实重要数据
             </div>
           </div>
         </div>
       </Layout>
 
-      <LoginModal open={loginOpen} onLogin={handleLogin} onRegister={handleRegister} onClose={() => setLoginOpen(false)} />
       <SpaceCreateModal
         open={spaceCreateOpen}
         onClose={() => setSpaceCreateOpen(false)}
@@ -947,6 +928,7 @@ function App() {
         sql={traceData.sql}
       />
     </Layout>
+    </>
   );
 }
 

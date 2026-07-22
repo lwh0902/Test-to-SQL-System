@@ -1,7 +1,7 @@
 """认证 API - 登录（支持用户名/手机号）、注册、刷新、登出、获取用户信息"""
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.core.auth import (
     create_access_token, create_refresh_token, decode_refresh_token,
@@ -25,10 +25,10 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     phone: str
     password: str
     display_name: str
-    role: str = "tester"
 
 
 class RefreshRequest(BaseModel):
@@ -93,7 +93,6 @@ def register(request: Request, req: RegisterRequest):
         phone=req.phone,
         password=req.password,
         display_name=req.display_name,
-        role=req.role,
     )
     return _build_token_response(user)
 

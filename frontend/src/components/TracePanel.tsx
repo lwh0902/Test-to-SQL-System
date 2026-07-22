@@ -51,7 +51,7 @@ export default function TracePanel({ trace, loading }: Props) {
                 ) : isDenied ? (
                   <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
                 ) : (
-                  <LoadingOutlined style={{ color: '#1890ff' }} />
+                  <LoadingOutlined style={{ color: '#C079FF' }} />
                 )}
                 <span>{label}</span>
                 {isDone && <Tag color="success" style={{ marginLeft: 4 }}>通过</Tag>}
@@ -64,8 +64,8 @@ export default function TracePanel({ trace, loading }: Props) {
               )}
               {hasOutput && !isDenied && (
                 <details style={{ marginLeft: 24, marginTop: 2 }}>
-                  <summary style={{ fontSize: 12, color: '#999', cursor: 'pointer' }}>详情</summary>
-                  <pre style={{ fontSize: 11, color: '#666', margin: '4px 0', whiteSpace: 'pre-wrap' }}>
+                  <summary style={{ fontSize: 12, color: '#9B97AD', cursor: 'pointer' }}>详情</summary>
+                  <pre style={{ fontSize: 11, color: '#6E6A82', margin: '4px 0', whiteSpace: 'pre-wrap' }}>
                     {JSON.stringify(step.output, null, 2)}
                   </pre>
                 </details>
@@ -74,7 +74,7 @@ export default function TracePanel({ trace, loading }: Props) {
           );
         })}
         {loading && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#999' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#9B97AD' }}>
             <LoadingOutlined />
             <span>处理中...</span>
           </div>

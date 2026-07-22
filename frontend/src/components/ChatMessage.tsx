@@ -6,13 +6,13 @@ import type { DataMapQuestion } from '../services/api';
 import datapilotAppIcon from '../assets/datapilot-app-icon.png';
 import DataMapBlock from './DataMapBlock';
 
-const BRAND_INK = '#071113';
-const BRAND_PANEL = '#0B181A';
-const BRAND_CARD = '#102326';
-const BRAND_LIME = '#9BCB2D';
-const BRAND_BORDER = '#183235';
-const BRAND_MUTED = '#7D8B8E';
-const BRAND_TEXT = '#EEF4F2';
+const BRAND_INK = '#FFFFFF';
+const BRAND_PANEL = 'rgba(255, 255, 255, 0.03)';
+const BRAND_CARD = 'rgba(255, 255, 255, 0.05)';
+const BRAND_LIME = '#C079FF';
+const BRAND_BORDER = 'rgba(255, 255, 255, 0.1)';
+const BRAND_MUTED = '#9B97AD';
+const BRAND_TEXT = '#F4F4F8';
 
 interface Props {
   role: 'user' | 'assistant';
@@ -56,24 +56,24 @@ function ChartBlock({ chart, columns, rows }: { chart: ChartConfig; columns: str
           tooltip: {
             trigger: 'axis' as const,
             backgroundColor: BRAND_CARD,
-            borderColor: '#294D51',
+            borderColor: 'rgba(255, 255, 255, 0.1)',
             textStyle: { fontSize: 12, color: BRAND_TEXT },
             formatter: (params: { seriesName: string; value: number }[]) =>
               params.map((p) => `${p.seriesName}: ${formatValue(p.value, value_format)}`).join('<br/>'),
           },
           xAxis: {
             type: 'category' as const, data: xData, boundaryGap: false,
-            axisLine: { lineStyle: { color: '#294D51' } },
+            axisLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.1)' } },
             axisLabel: { color: BRAND_MUTED, fontSize: 11 },
           },
           yAxis: {
             type: 'value' as const,
-            splitLine: { lineStyle: { color: '#132B2E' } },
+            splitLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.06)' } },
             axisLabel: { color: BRAND_MUTED, fontSize: 11 },
           },
           series,
           grid: baseGrid,
-          color: [BRAND_LIME, '#5F8D91', '#CDE0DC'],
+          color: [BRAND_LIME, '#9B97AD', '#C4C0D4'],
         }}
         style={{ height: 260 }}
         opts={{ renderer: 'svg' }}
@@ -89,16 +89,16 @@ function ChartBlock({ chart, columns, rows }: { chart: ChartConfig; columns: str
     return (
       <ReactECharts
         option={{
-          tooltip: { trigger: 'axis' as const, backgroundColor: BRAND_CARD, borderColor: '#294D51', textStyle: { fontSize: 12, color: BRAND_TEXT } },
+          tooltip: { trigger: 'axis' as const, backgroundColor: BRAND_CARD, borderColor: 'rgba(255, 255, 255, 0.1)', textStyle: { fontSize: 12, color: BRAND_TEXT } },
           xAxis: {
             type: 'category' as const,
             data: data.map((d) => d.name),
             axisLabel: { rotate: data.length > 6 ? 30 : 0, color: BRAND_MUTED, fontSize: 11 },
-            axisLine: { lineStyle: { color: '#294D51' } },
+            axisLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.1)' } },
           },
           yAxis: {
             type: 'value' as const,
-            splitLine: { lineStyle: { color: '#132B2E' } },
+            splitLine: { lineStyle: { color: 'rgba(255, 255, 255, 0.06)' } },
             axisLabel: { color: BRAND_MUTED, fontSize: 11 },
           },
           series: [{
@@ -138,9 +138,11 @@ export default function ChatMessage({ role, content, data, onCandidateClick, onD
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 20 }}>
         <div style={{ maxWidth: 'min(75%, 520px)' }}>
           <div style={{
-            background: BRAND_LIME,
-          color: BRAND_INK, padding: '10px 18px', borderRadius: '16px 16px 4px 16px',
-          fontSize: 14, lineHeight: '22px', boxShadow: '0 8px 22px rgba(155,203,45,0.16)',
+            background: 'rgba(255, 255, 255, 0.06)',
+            border: '1px solid rgba(255, 255, 255, 0.12)',
+            color: BRAND_INK, padding: '10px 18px', borderRadius: '16px 16px 4px 16px',
+            fontSize: 14, lineHeight: '22px',
+            backdropFilter: 'blur(10px)', WebkitBackdropFilter: 'blur(10px)',
           }}>
             {content}
           </div>
@@ -281,7 +283,7 @@ export default function ChatMessage({ role, content, data, onCandidateClick, onD
                 ...(data!.rows && data!.rows.length > 0
                   ? [{
                       key: 'data',
-                      label: <span style={{ fontSize: 12, color: '#A9B7BA' }}>数据表（{data!.rows.length} 行）</span>,
+                      label: <span style={{ fontSize: 12, color: '#9B97AD' }}>数据表（{data!.rows.length} 行）</span>,
                       children: (
                         <div style={{ overflow: 'auto' }}>
                           <Table
@@ -298,10 +300,10 @@ export default function ChatMessage({ role, content, data, onCandidateClick, onD
                 ...(data!.sql
                   ? [{
                       key: 'sql',
-                      label: <span style={{ fontSize: 12, color: '#A9B7BA' }}>SQL</span>,
+                      label: <span style={{ fontSize: 12, color: '#9B97AD' }}>SQL</span>,
                       children: (
                         <pre style={{
-                          background: '#050B0C', color: '#CDE0DC',
+                          background: '#06030F', color: '#C4C0D4',
                           padding: 14, borderRadius: 8, fontSize: 12, overflow: 'auto',
                           lineHeight: '18px', margin: 0,
                         }}>
@@ -313,19 +315,19 @@ export default function ChatMessage({ role, content, data, onCandidateClick, onD
                 ...(data!.trace && data!.trace.length > 0
                   ? [{
                       key: 'trace',
-                      label: <span style={{ fontSize: 12, color: '#A9B7BA' }}>Trace（{data!.trace.length} 步）</span>,
+                      label: <span style={{ fontSize: 12, color: '#9B97AD' }}>Trace（{data!.trace.length} 步）</span>,
                       children: (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                           {data!.trace.map((step, i) => (
                             <div key={i} style={{
                               display: 'flex', alignItems: 'center', gap: 8, fontSize: 12,
                               padding: '4px 8px', borderRadius: 4,
-                              background: step.status === 'done' || step.status === 'passed' ? 'rgba(155,203,45,0.12)' : 'rgba(255,77,79,0.1)',
+                              background: step.status === 'done' || step.status === 'passed' ? 'rgba(192, 121, 255, 0.14)' : 'rgba(255,77,79,0.1)',
                             }}>
                               <span style={{ color: step.status === 'done' || step.status === 'passed' ? '#52c41a' : '#ff4d4f' }}>
                                 {step.status === 'done' || step.status === 'passed' ? '✓' : '✗'}
                               </span>
-                              <span style={{ color: '#C4CECC' }}>{step.node}</span>
+                              <span style={{ color: '#B5B1C6' }}>{step.node}</span>
                             </div>
                           ))}
                           <Button type="link" size="small" icon={<LineChartOutlined />}

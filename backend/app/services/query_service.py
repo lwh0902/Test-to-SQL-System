@@ -27,6 +27,8 @@ def execute_query(sql: str, params: dict, space_id: str = "") -> tuple[list[str]
             raise QuerySafeError(explain_result)
 
     with eng.connect() as conn:
+        # 数据库侧强制执行时间，不能只依赖应用线程等待。
+        conn.execute(text("SET SESSION MAX_EXECUTION_TIME = :timeout_ms"), {"timeout_ms": QUERY_TIMEOUT_SECONDS * 1000})
         result = conn.execute(text(sql), params)
         columns = list(result.keys())
         raw_rows = result.fetchall()
@@ -55,8 +57,9 @@ def _explain_check(eng, sql: str, params: dict) -> str | None:
                     return f"查询预计扫描 {int(examined_rows)} 行，超过安全上限 {EXPLAIN_MAX_ROWS} 行，请添加更精确的 WHERE 条件"
     except QuerySafeError:
         raise
-    except Exception:
-        pass
+    except Exception as exc:
+        # 预检不可用时拒绝执行，避免在保护失效时继续跑未知代价 SQL。
+        return f"查询预检失败，已拒绝执行：{type(exc).__name__}"
     return None
 
 

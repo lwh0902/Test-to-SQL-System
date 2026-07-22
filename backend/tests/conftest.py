@@ -1,6 +1,10 @@
 import os
+import base64
 
 import pytest
+
+os.environ.setdefault("JWT_SECRET", "test-secret-for-pytest-0123456789abcdef")
+os.environ.setdefault("DB_ENCRYPTION_KEY", base64.b64encode(b"t" * 32).decode())
 
 
 @pytest.fixture(autouse=True)

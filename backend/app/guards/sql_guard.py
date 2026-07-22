@@ -19,7 +19,7 @@ from sqlglot import exp
 
 SENSITIVE_FIELD_PATTERNS = {"phone", "mobile", "email", "id_card", "password", "secret", "token", "credit_card"}
 
-DANGEROUS_FUNCTIONS = {"LOAD_FILE", "BENCHMARK", "SLEEP"}
+DANGEROUS_FUNCTIONS = {"LOAD_FILE", "BENCHMARK", "SLEEP", "GET_LOCK", "RELEASE_LOCK"}
 DANGEROUS_STATEMENTS = {
     exp.Insert, exp.Update, exp.Delete, exp.Drop,
     exp.Alter, exp.Create, exp.TruncateTable,
@@ -50,6 +50,13 @@ class FreeformSQLGuard:
 
     MAX_LIMIT = 500
 
+    def __init__(self, permitted_tables: set[str] | None = None, permitted_columns: dict[str, set[str]] | None = None):
+        self.permitted_tables = {table.lower() for table in (permitted_tables or set())}
+        self.permitted_columns = {
+            table.lower(): {column.lower() for column in columns}
+            for table, columns in (permitted_columns or {}).items()
+        }
+
     def check(self, sql: str) -> GuardResult:
         try:
             statements = sqlglot.parse(sql, dialect="mysql")
@@ -69,9 +76,15 @@ class FreeformSQLGuard:
                 return GuardResult(False, "DANGEROUS_OPERATION", f"禁止执行 {type(stmt).__name__} 操作")
             return GuardResult(False, "NOT_SELECT", "只允许 SELECT 查询")
 
+        # 自由查询缺少可验证的别名/血缘模型时，复杂查询一律拒绝而非猜测授权。
+        if stmt.find(exp.Join) or stmt.find(exp.Subquery) or stmt.args.get("with"):
+            return GuardResult(False, "COMPLEX_QUERY_DENIED", "自由查询暂不支持 JOIN、子查询或 CTE")
+
         has_where = bool(stmt.find(exp.Where))
 
         for node in stmt.walk():
+            if any(isinstance(node, statement_type) for statement_type in DANGEROUS_STATEMENTS):
+                return GuardResult(False, "DANGEROUS_OPERATION", "禁止嵌套写操作")
             if isinstance(node, exp.Anonymous) and node.name.upper() in DANGEROUS_FUNCTIONS:
                 return GuardResult(False, "DANGEROUS_FUNCTION", f"禁止使用函数 {node.name.upper()}")
 
@@ -79,12 +92,31 @@ class FreeformSQLGuard:
                 col_name = node.name.lower()
                 if col_name in SENSITIVE_FIELD_PATTERNS:
                     return GuardResult(False, "SENSITIVE_FIELD_DENIED", f"禁止访问敏感字段: {col_name}")
+                if self.permitted_columns:
+                    table_name = (node.table or "").lower()
+                    allowed = self.permitted_columns.get(table_name)
+                    if allowed is None and len(self.permitted_columns) == 1:
+                        allowed = next(iter(self.permitted_columns.values()))
+                    if allowed is not None and col_name not in allowed:
+                        return GuardResult(False, "COLUMN_NOT_PERMITTED", f"无权访问字段: {col_name}")
 
         if self._has_select_star(stmt):
             return GuardResult(False, "SELECT_STAR_DENIED", "禁止 SELECT *，请明确列出查询字段")
 
+        if self.permitted_tables:
+            for table in stmt.find_all(exp.Table):
+                if table.db or table.catalog or table.name.lower() not in self.permitted_tables:
+                    return GuardResult(False, "TABLE_NOT_PERMITTED", "无权访问表")
+
         if not has_where and not stmt.find(exp.Limit):
             return GuardResult(False, "NO_WHERE_NO_LIMIT", "查询缺少 WHERE 条件且无 LIMIT，可能扫描全表")
+
+        limit = stmt.find(exp.Limit)
+        try:
+            if limit and int(limit.expression.this) > self.MAX_LIMIT:
+                return GuardResult(False, "LIMIT_EXCEEDED", f"LIMIT 不能超过 {self.MAX_LIMIT}")
+        except (ValueError, TypeError, AttributeError):
+            return GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
 
         return GuardResult(True)
 
@@ -184,6 +216,14 @@ class SQLGuard:
         # 6. 检查 LIMIT
         if not stmt.find(exp.Limit):
             return GuardResult(False, "NO_LIMIT", "查询必须包含 LIMIT 子句")
+
+        limit = stmt.find(exp.Limit)
+        try:
+            value = int(limit.expression.this)
+            if value > self.max_limit:
+                return GuardResult(False, "LIMIT_EXCEEDED", f"LIMIT 不能超过 {self.max_limit}")
+        except (TypeError, ValueError, AttributeError):
+            return GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
 
         return GuardResult(True)
 

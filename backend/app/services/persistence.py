@@ -11,16 +11,16 @@ from sqlalchemy import text
 from app.core.database import engine
 
 
-def load_recent_messages(session_id: str | None, limit: int = 6) -> list[dict]:
+def load_recent_messages(session_id: str | None, limit: int = 6, user_id: int | None = None, space_id: str | None = None) -> list[dict]:
     """从 chat_messages 取最近 N 条消息（用于上下文）"""
     if not session_id:
         return []
     with engine.connect() as conn:
+        ownership = "" if user_id is None or space_id is None else " AND session_id IN (SELECT id FROM chat_sessions WHERE id = :sid AND user_id = :user_id AND space_id = :space_id)"
         result = conn.execute(text("""
             SELECT role, content, meta FROM chat_messages
             WHERE session_id = :sid
-            ORDER BY seq DESC LIMIT :lim
-        """), {"sid": session_id, "lim": limit})
+        """ + ownership + " ORDER BY created_at DESC, id DESC LIMIT :lim"), {"sid": session_id, "lim": limit, "user_id": user_id, "space_id": space_id})
         messages = []
         for r in reversed(list(result)):  # 按时间正序返回
             msg = {"role": r[0], "content": r[1]}
@@ -31,14 +31,14 @@ def load_recent_messages(session_id: str | None, limit: int = 6) -> list[dict]:
         return messages
 
 
-def load_working_memory(session_id: str | None) -> dict | None:
+def load_working_memory(session_id: str | None, user_id: int | None = None, space_id: str | None = None) -> dict | None:
     """加载 session 的 working_memory"""
     if not session_id:
         return None
     with engine.connect() as conn:
         result = conn.execute(text(
-            "SELECT working_memory FROM chat_sessions WHERE id = :sid"
-        ), {"sid": session_id})
+            "SELECT working_memory FROM chat_sessions WHERE id = :sid" + (" AND user_id = :user_id AND space_id = :space_id" if user_id is not None and space_id is not None else "")
+        ), {"sid": session_id, "user_id": user_id, "space_id": space_id})
         row = result.fetchone()
         if row and row[0]:
             return row[0] if isinstance(row[0], dict) else json.loads(row[0])
@@ -233,6 +233,7 @@ def persist_from_agent_state(state):
     # 5. 保存到内存 trace_store（兼容）
     trace_store.save(state.trace_id, {
         "trace_id": state.trace_id, "question": state.question,
+        "user_id": state.user_id,
         "intent": state.intent.model_dump() if state.intent else None,
         "steps": state.trace,
         "sql": state.sql, "rows_count": len(state.rows),
@@ -267,3 +268,11 @@ def persist_from_agent_state(state):
 
     # 7. 自动生成 session 标题
     auto_rename_session(session_id, state.question)
+
+    # 8. 每六个用户轮次压缩一次；摘要仅以当前 session/user/space 读取。
+    try:
+        from app.services.session_memory_service import refresh_session_memory
+        messages = load_recent_messages(session_id, limit=12, user_id=state.user_id, space_id=state.space_id)
+        refresh_session_memory(session_id, state.user_id, state.space_id, messages)
+    except Exception:
+        pass

@@ -53,7 +53,7 @@ def get_session(session_id: str, user_id: int) -> dict | None:
             return None
 
         msg_result = conn.execute(text(
-            "SELECT id, role, content, meta, created_at FROM chat_messages WHERE session_id = :sid ORDER BY seq ASC"
+            "SELECT id, role, content, meta, created_at FROM chat_messages WHERE session_id = :sid ORDER BY created_at ASC, id ASC"
         ), {"sid": session_id})
         messages = []
         for m in msg_result.fetchall():
@@ -77,6 +77,7 @@ def delete_session(session_id: str, user_id: int) -> bool:
         if not result.fetchone():
             return False
         conn.execute(text("DELETE FROM chat_messages WHERE session_id = :sid"), {"sid": session_id})
+        conn.execute(text("DELETE FROM session_memories WHERE session_id = :sid AND user_id = :user_id"), {"sid": session_id, "user_id": user_id})
         conn.execute(text("DELETE FROM chat_sessions WHERE id = :id"), {"id": session_id})
         conn.commit()
     return True

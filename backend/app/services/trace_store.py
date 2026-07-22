@@ -23,10 +23,10 @@ class TraceStore:
         with self._lock:
             return self._traces.get(trace_id)
 
-    def list_recent(self, limit: int = 20) -> list[dict]:
+    def list_recent(self, limit: int = 20, user_id: int | None = None) -> list[dict]:
         with self._lock:
             traces = sorted(
-                self._traces.values(),
+                (trace for trace in self._traces.values() if user_id is None or trace.get("user_id") == user_id),
                 key=lambda t: t.get("saved_at", ""),
                 reverse=True,
             )

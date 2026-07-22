@@ -3,13 +3,13 @@ import { DatabaseOutlined } from '@ant-design/icons';
 import type { DataMap, DataMapQuestion } from '../services/api';
 import type { DbIdentity } from '../types';
 
-const BRAND_INK = '#071113';
-const BRAND_PANEL = '#0B181A';
-const BRAND_CARD = '#102326';
-const BRAND_LIME = '#9BCB2D';
-const BRAND_BORDER = '#183235';
-const BRAND_MUTED = '#7D8B8E';
-const BRAND_TEXT = '#EEF4F2';
+const BRAND_INK = '#FFFFFF';
+const BRAND_PANEL = 'rgba(255, 255, 255, 0.03)';
+const BRAND_CARD = 'rgba(255, 255, 255, 0.05)';
+const BRAND_LIME = '#C079FF';
+const BRAND_BORDER = 'rgba(255, 255, 255, 0.1)';
+const BRAND_MUTED = '#9B97AD';
+const BRAND_TEXT = '#F4F4F8';
 
 interface Props {
   dataMap: DataMap;
@@ -24,8 +24,8 @@ function getColumnLabel(table: DataMap['tables'][number], columnName: string): s
 }
 
 export default function DataMapBlock({ dataMap, dbIdentity, compact = false, onQuestionClick }: Props) {
-  const questionLimit = compact ? 4 : 6;
-  const tableLimit = compact ? 6 : 8;
+  const questionLimit = compact ? 3 : 6;
+  const tableLimit = compact ? 4 : 8;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: compact ? 12 : 16 }}>
@@ -63,7 +63,7 @@ export default function DataMapBlock({ dataMap, dbIdentity, compact = false, onQ
                 minHeight: compact ? 42 : 74,
                 borderRadius: compact ? 10 : 14,
                 cursor: onQuestionClick ? 'pointer' : 'default',
-                border: idx === 0 ? `1px solid ${BRAND_LIME}` : '1px solid #31595D',
+                border: idx === 0 ? `1px solid ${BRAND_LIME}` : '1px solid rgba(255, 255, 255, 0.1)',
                 color: idx === 0 ? BRAND_INK : BRAND_TEXT,
                 background: idx === 0 ? BRAND_LIME : BRAND_CARD,
                 transition: 'all 0.2s',
@@ -82,17 +82,17 @@ export default function DataMapBlock({ dataMap, dbIdentity, compact = false, onQ
         <div className="data-map-tables" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: compact ? 10 : 12 }}>
           {dataMap.tables.slice(0, tableLimit).map((table) => (
             <div key={table.name} style={{
-              background: BRAND_CARD, border: '1px solid #24464A', borderRadius: compact ? 10 : 12,
+              background: BRAND_CARD, border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: compact ? 10 : 12,
               padding: compact ? 12 : 14, minHeight: compact ? undefined : 124,
             }}>
               <div style={{ color: BRAND_TEXT, fontSize: compact ? 14 : 16, fontWeight: 800, marginBottom: 8 }}>{table.title}</div>
-              <div style={{ color: '#A9B7BA', fontSize: compact ? 11 : 12, lineHeight: compact ? '16px' : '18px', marginBottom: 10 }}>
+              <div style={{ color: '#9B97AD', fontSize: compact ? 11 : 12, lineHeight: compact ? '16px' : '18px', marginBottom: 10 }}>
                 {table.description}
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {table.key_columns.slice(0, compact ? 4 : 5).map((col) => (
+                {table.key_columns.slice(0, compact ? 3 : 5).map((col) => (
                   <span key={col} title={col} style={{
-                    color: '#D8E6E3', background: '#143034', border: '1px solid #31595D', borderRadius: 999,
+                    color: '#DCD8E8', background: 'rgba(255, 255, 255, 0.08)', border: '1px solid rgba(255, 255, 255, 0.1)', borderRadius: 999,
                     padding: compact ? '2px 7px' : '3px 8px', fontSize: compact ? 10 : 11,
                   }}>
                     {getColumnLabel(table, col)}

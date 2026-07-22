@@ -1,15 +1,18 @@
 """FastAPI 应用入口"""
 
 import os
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from app.core.rate_limit import limiter
+from app.core.config import validate_security_config
 
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(env_path)
@@ -17,6 +20,8 @@ load_dotenv(env_path)
 if os.getenv("JWT_SECRET", "") in ("", "change-me-in-production", "datapilot-secret-key-change-in-prod"):
     import warnings
     warnings.warn("JWT_SECRET is not set or using default value. Set a strong secret in production.")
+
+validate_security_config()
 
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
@@ -32,6 +37,16 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    try:
+        response = await call_next(request)
+    except Exception:
+        return JSONResponse(status_code=500, content={"code": "INTERNAL_ERROR", "message": "服务内部错误", "request_id": request_id}, headers={"X-Request-ID": request_id})
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 app.add_middleware(
     CORSMiddleware,

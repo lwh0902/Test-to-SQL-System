@@ -1,0 +1,110 @@
+:root {
+  --color-1: #a558fb;
+  --color-2: #c079ff;
+  --color-3: #4922e5;
+  --color-4: #ffffff;
+}
+
+.gooey-nav-container {
+  --color-1: #a558fb;
+  --color-2: #c079ff;
+  --color-3: #4922e5;
+  --color-4: #ffffff;
+  position: relative;
+  width: 100%;
+  font-family: 'Inter', 'PingFang SC', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.gooey-nav-container nav ul {
+  display: flex;
+  gap: 2em;
+  list-style: none;
+  padding: 0.5em;
+  margin: 0;
+  position: relative;
+}
+
+.gooey-nav-container.vertical nav ul {
+  flex-direction: column;
+  gap: 0.25em;
+  padding: 0.25em;
+  align-items: stretch;
+}
+
+.gooey-nav-container nav ul li {
+  position: relative;
+  z-index: 2;
+}
+
+.gooey-nav-container nav ul li button {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: #c4b8de;
+  font-size: 0.95em;
+  font-weight: 500;
+  padding: 0.6em 1em;
+  display: block;
+  width: 100%;
+  text-align: left;
+  position: relative;
+  z-index: 3;
+  letter-spacing: 0.01em;
+  transition: color 0.3s ease;
+  font-family: inherit;
+}
+
+.gooey-nav-container.vertical nav ul li button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0.7em 0.9em;
+  border-radius: 8px;
+}
+
+.gooey-nav-container nav ul li button:hover {
+  color: #ffffff;
+}
+
+.gooey-nav-container nav ul li.active button {
+  color: #1a0f30;
+  font-weight: 700;
+}
+
+.gooey-nav-container nav ul li.active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: #ffffff;
+  border-radius: 8px;
+  z-index: 1;
+  box-shadow: 0 4px 18px rgba(255, 255, 255, 0.18);
+}
+
+.gooey-nav-container.vertical nav ul li.active::after {
+  border-radius: 8px;
+}
+
+.gooey-nav-container nav ul li.active button > * {
+  position: relative;
+  z-index: 4;
+}
+
+.particle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 2;
+  display: none;
+}
+
+.gooey-nav-container .effect {
+  position: absolute;
+  opacity: 1;
+  pointer-events: none;
+  display: block;
+  width: 0;
+  height: 0;
+}

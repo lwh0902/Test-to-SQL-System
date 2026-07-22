@@ -260,12 +260,8 @@ def profile_tables(space_id: str) -> dict:
         if table_info.get("description") and table_info.get("_profiled"):
             continue
 
-        # 安全采样
+        # 默认不读取或外发真实行数据；仅使用 schema 元数据生成描述。
         samples = []
-        try:
-            samples = safe_sample_table(space_id, table_name, limit=3)
-        except Exception:
-            pass
 
         # 构建列摘要
         columns = table_info.get("columns", [])
@@ -282,10 +278,6 @@ def profile_tables(space_id: str) -> dict:
             table_info["description"] = description
             table_info["_profiled"] = True
             profiled += 1
-
-        # 保存样例数据（脱敏后）
-        if samples:
-            table_info["sample_data"] = samples
 
     # 写回 db_schema
     if profiled > 0:

@@ -1,13 +1,15 @@
 """数据库连接 API - CRUD + 测试"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core.auth import get_current_user
 from app.services.db_connection_service import (
     create_connection, list_connections, test_connection,
-    test_direct_connection, discover_schema_direct, delete_connection,
+    delete_connection, test_direct_connection, discover_schema_direct,
 )
+from app.core.rate_limit import limiter
+from app.services.audit_service import audit_security_event
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
 
@@ -45,20 +47,45 @@ def list_connections_endpoint(user: dict = Depends(get_current_user)):
     return {"connections": list_connections(user_id)}
 
 
-@router.post("/{connection_id}/test")
-def test_connection_endpoint(connection_id: str, user: dict = Depends(get_current_user)):
-    user_id = user.get("user_id", 1)
-    return test_connection(connection_id, user_id)
-
-
 @router.post("/test-direct")
-def test_direct_endpoint(req: TestDirectRequest, user: dict = Depends(get_current_user)):
-    return test_direct_connection(req.host, req.port, req.db_user, req.db_password, req.db_name)
+@limiter.limit("10/minute")
+def test_direct_connection_endpoint(request: Request, req: TestDirectRequest, user: dict = Depends(get_current_user)):
+    user_id = user.get("user_id", 1)
+    result = test_direct_connection(
+        host=req.host, port=req.port, db_user=req.db_user,
+        db_password=req.db_password, db_name=req.db_name,
+    )
+    audit_security_event(
+        "connection_direct_test", request.headers.get("X-Request-ID", ""), user_id,
+        ok=result.get("ok", False),
+    )
+    return result
 
 
 @router.post("/discover-schema")
-def discover_schema_endpoint(req: TestDirectRequest, user: dict = Depends(get_current_user)):
-    return discover_schema_direct(req.host, req.port, req.db_user, req.db_password, req.db_name)
+@limiter.limit("5/minute")
+def discover_schema_direct_endpoint(request: Request, req: TestDirectRequest, user: dict = Depends(get_current_user)):
+    user_id = user.get("user_id", 1)
+    result = discover_schema_direct(
+        host=req.host, port=req.port, db_user=req.db_user,
+        db_password=req.db_password, db_name=req.db_name,
+    )
+    audit_security_event(
+        "connection_schema_discovery", request.headers.get("X-Request-ID", ""), user_id,
+        ok=result.get("ok", False),
+    )
+    return result
+
+
+@router.post("/{connection_id}/test")
+@limiter.limit("10/minute")
+def test_connection_endpoint(request: Request, connection_id: str, user: dict = Depends(get_current_user)):
+    user_id = user.get("user_id", 1)
+    result = test_connection(connection_id, user_id)
+    audit_security_event("connection_test", request.headers.get("X-Request-ID", ""), user_id, connection_id=connection_id, ok=result.get("ok", False))
+    if not result.get("ok"):
+        return {"ok": False, "code": "CONNECTION_FAILED", "message": "连接测试失败"}
+    return result
 
 
 @router.delete("/{connection_id}")

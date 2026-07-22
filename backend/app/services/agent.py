@@ -108,6 +108,8 @@ _DIAGNOSIS_PATTERNS = ("为什么", "怎么回事", "为什么没", "为什么�
 
 _TABLE_VIEW_PATTERNS = ("看", "查", "打开", "查看", "浏览", "列出", "显示", "展示",
                         "我要看", "帮我查", "看一下")
+_FOLLOW_UP_PATTERNS = ("拆一下", "按", "换", "刚才", "上一个", "这个", "它", "改成", "再", "继续", "同样")
+_QUERY_PATTERNS = ("趋势", "多少", "统计", "查询", "查", "看", "分析", "排行", "分布", "拆", "最近", "昨天", "本月")
 
 
 def _should_diagnose(question: str, wm: dict | None) -> bool:
@@ -157,7 +159,7 @@ def _route_with_rules(question: str) -> str | None:
     return None
 
 
-def _route_with_llm(question: str) -> str:
+def _route_with_llm(question: str) -> str | None:
     """LLM 兜底分类 — 识别全部路由类型"""
     from anthropic import Anthropic
 
@@ -194,9 +196,18 @@ def _route_with_llm(question: str) -> str:
         for route in ("diagnosis", "database_profile", "schema_help", "table_query", "follow_up", "plan_execute", "data_query", "chat", "help"):
             if route in text:
                 return route
-        return "data_query"
+        return None
     except Exception:
+        return None
+
+
+def _fallback_route(question: str, wm: dict | None) -> str:
+    q = question.strip().lower()
+    if wm and any(pattern in q for pattern in _FOLLOW_UP_PATTERNS):
+        return "follow_up"
+    if any(pattern in q for pattern in _QUERY_PATTERNS):
         return "data_query"
+    return "clarification"
 
 
 def _mentions_known_table(space_id: str, question: str) -> bool:
@@ -231,7 +242,7 @@ def intent_router(state: AgentState) -> dict:
     _add_event(state, "run_started", {"text": "开始分析你的问题"})
 
     # 加载上一轮任务帧
-    wm = load_working_memory(state.session_id)
+    wm = load_working_memory(state.session_id, state.user_id, state.space_id)
     state.working_memory = wm
 
     # 1. 规则分类（零成本）
@@ -247,7 +258,7 @@ def intent_router(state: AgentState) -> dict:
 
     # 4. LLM 兜底
     if route is None:
-        route = _route_with_llm(question)
+        route = _route_with_llm(question) or _fallback_route(question, wm)
 
     state.route = route
     state.trace_id = generate_trace_id()
@@ -262,6 +273,7 @@ def intent_router(state: AgentState) -> dict:
         "table_query": "识别为表数据查询",
         "database_profile": "识别为数据库档案",
         "schema_help": "识别为表结构查询",
+        "clarification": "需要进一步澄清",
     }
 
     _add_event(state, "route_done", {
@@ -278,8 +290,8 @@ def context_resolver(state: AgentState) -> dict:
     from app.services.persistence import load_recent_messages, load_working_memory
 
     # 加载上下文
-    history = load_recent_messages(state.session_id, limit=6)
-    wm = load_working_memory(state.session_id)
+    history = load_recent_messages(state.session_id, limit=12, user_id=state.user_id, space_id=state.space_id)
+    wm = load_working_memory(state.session_id, state.user_id, state.space_id)
     state.chat_history = history
     state.working_memory = wm
 
@@ -317,6 +329,13 @@ def context_resolver(state: AgentState) -> dict:
     )
     if wm_lines:
         prompt += "工作记忆:\n" + "\n".join(f"- {l}" for l in wm_lines) + "\n\n"
+    try:
+        from app.services.session_memory_service import load_session_memory
+        long_memory = load_session_memory(state.session_id, state.user_id, state.space_id)
+        if long_memory:
+            prompt += "本会话长期摘要（不得扩展到其他会话）:\n" + long_memory + "\n\n"
+    except Exception:
+        pass
     prompt += "历史对话:\n" + "\n".join(history_lines) + f"\n\n当前问题: {state.question}\n\n"
     prompt += (
         "规则:\n"
@@ -459,6 +478,14 @@ def database_profile_responder(state: AgentState) -> dict:
             "events": state.events, "trace": state.trace}
 
 
+def clarification_responder(state: AgentState) -> dict:
+    state.response_type = "clarification"
+    state.message = "我还不能确定你的意图。请说明要查询的指标、时间范围，或告诉我是在继续上一轮的哪个维度。"
+    state.trace.append({"node": "clarification_responder", "status": "done", "output": {}})
+    _add_event(state, "clarification_response", {"status": "done"})
+    return {"message": state.message, "response_type": state.response_type, "events": state.events, "trace": state.trace}
+
+
 def diagnosis_handler(state: AgentState) -> dict:
     """诊断上一轮查询为什么没有结果"""
     from anthropic import Anthropic
@@ -574,8 +601,8 @@ def table_query_handler(state: AgentState) -> dict:
     """表查询处理：识别表名，设置 freeform 模式后走 freeform SQL 路径"""
     from app.services.persistence import load_recent_messages, load_working_memory
 
-    history = load_recent_messages(state.session_id, limit=6)
-    wm = load_working_memory(state.session_id)
+    history = load_recent_messages(state.session_id, limit=12, user_id=state.user_id, space_id=state.space_id)
+    wm = load_working_memory(state.session_id, state.user_id, state.space_id)
     state.chat_history = history
     state.working_memory = wm
     state.is_freeform = True
@@ -1323,16 +1350,7 @@ def freeform_sql_generator(state: AgentState) -> dict:
             col_parts.append(part)
         schema_lines.extend(col_parts)
 
-        # 安全采样 2 行样例值，帮助 LLM 理解数据内容
-        try:
-            samples = safe_sample_table(state.space_id or "", table_name, limit=2)
-            if samples:
-                sample_line = "  样例: " + " | ".join(
-                    f"{k}={v}" for k, v in samples[0].items()
-                )
-                schema_lines.append(sample_line)
-        except Exception:
-            pass
+        # 不向 LLM 提供真实业务行数据，schema 元数据足以生成只读查询。
 
     schema_text = "\n".join(schema_lines)
 
@@ -1394,7 +1412,13 @@ def freeform_sql_guard_node(state: AgentState) -> dict:
         return {}
 
     from app.guards.sql_guard import FreeformSQLGuard
-    guard = FreeformSQLGuard()
+    schema = _load_space_schema(state.space_id) or {}
+    permitted_tables = set(schema)
+    permitted_columns = {
+        table: {column.get("name", "") for column in info.get("columns", [])}
+        for table, info in schema.items() if isinstance(info, dict)
+    }
+    guard = FreeformSQLGuard(permitted_tables=permitted_tables, permitted_columns=permitted_columns)
 
     # 先自动补 LIMIT
     state.sql = guard.ensure_limit(state.sql)
@@ -1452,6 +1476,8 @@ def route_intent(state: AgentState) -> str:
         return "diagnosis"
     if route == "table_query":
         return "table_query"
+    if route == "clarification":
+        return "clarification"
     # data_query 直接走 planner
     return "query"
 
@@ -1465,6 +1491,7 @@ def build_graph() -> StateGraph:
     graph.add_node("help_responder", help_responder)
     graph.add_node("schema_help_responder", schema_help_responder)
     graph.add_node("database_profile_responder", database_profile_responder)
+    graph.add_node("clarification_responder", clarification_responder)
     graph.add_node("planner", planner)
     graph.add_node("freeform_sql_generator", freeform_sql_generator)
     graph.add_node("freeform_sql_guard", freeform_sql_guard_node)
@@ -1495,6 +1522,7 @@ def build_graph() -> StateGraph:
         "plan_execute": "plan_generator",
         "diagnosis": "diagnosis_handler",
         "table_query": "table_query_handler",
+        "clarification": "clarification_responder",
     })
 
     # follow_up: context_resolver → planner
@@ -1505,6 +1533,7 @@ def build_graph() -> StateGraph:
     graph.add_edge("help_responder", "persister")
     graph.add_edge("schema_help_responder", "persister")
     graph.add_edge("database_profile_responder", "persister")
+    graph.add_edge("clarification_responder", "persister")
 
     # diagnosis → persister
     graph.add_edge("diagnosis_handler", "persister")

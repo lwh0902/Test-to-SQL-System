@@ -37,7 +37,6 @@ class MCPServer:
             return {"error": f"Unknown tool: {tool_name}"}
 
         handler = {
-            "execute_query": self._execute_query,
             "list_tables": self._list_tables,
             "describe_table": self._describe_table,
             "get_schema": self._get_schema,
@@ -50,19 +49,6 @@ class MCPServer:
             return handler(**arguments)
         except Exception as e:
             return {"error": str(e)}
-
-    def _execute_query(self, sql: str, params: dict | None = None) -> dict:
-        eng = self._get_engine()
-        with eng.connect() as conn:
-            result = conn.execute(text(sql), params or {})
-            columns = list(result.keys())
-            rows = []
-            for row in result.fetchall():
-                row_dict = {}
-                for col, val in zip(columns, row):
-                    row_dict[col] = self._serialize(val)
-                rows.append(row_dict)
-        return {"columns": columns, "rows": rows, "row_count": len(rows)}
 
     def _list_tables(self) -> dict:
         eng = self._get_engine()
