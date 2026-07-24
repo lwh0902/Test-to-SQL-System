@@ -1,247 +1,323 @@
-# DataPilot Development Specification
+# DataPilot 主链迁移与小范围试点 Development Specification
 
-> **状态：未完成，禁止按可上线交付。**
+> **当前状态：未完成，禁止按可上线或可试点交付。**
 >
-> 本文件是产品边界、系统架构、实施顺序和验收标准的唯一权威来源。其他设计文档、交接记录、测试报告或对话与本文件冲突时，以本文件为准。
+> 本文件是当前修复工作的唯一产品、架构、实施顺序和验收权威来源。历史 Phase 0–6 报告、旧 handoff、离线 benchmark、测试数量或对话与本文件冲突时，以本文件为准。
 >
-> 现有后端测试 `311 passed` 只能证明既有组件回归通过，不能证明真实用户任务可用。本文重新建立面向小范围用户试点的验收基线，旧阶段的完成标记不得直接沿用。
+> 2026-07-24 已确认：后端 `385 passed`，但真实 `/api/chat` 仍稳定出现 GMV 权限拒绝、追问丢上下文、DELETE 被路由成数据地图等问题。根因是新分析内核主要运行在测试和离线 runner，线上仍执行旧 LangGraph 主链。旧阶段的完成标记全部失效，必须按本文重新验收。
 
 ---
 
-## 1. 最终目标
+## 0. 后续执行者必须先遵守
 
-DataPilot 首轮上线目标不是演示多 Agent，也不是只支持预置电商指标，而是：
-
-> 小范围用户连接一套任意结构的 MySQL 数据库，系统自动完成建档和可用性检查；建档完成后，用户能通过自然语言稳定完成常用指标查询、趋势、分组、对比和连续下钻，并获得可核对、可解释、失败可恢复的答案。
-
-首轮试点成功必须同时满足：
-
-1. **正确**：数字、口径、时间范围、过滤条件和分组维度正确。
-2. **不乱猜**：信息不足或语义歧义时主动澄清，不静默补默认值。
-3. **链路可靠**：权限拒绝、空结果、SQL 拒绝、超时和执行异常会立即进入对应终止或恢复路径。
-4. **上下文连续**：追问是对上一轮分析规格的结构化修改，不依赖重新猜测整段对话。
-5. **证据可追溯**：每个业务结论能追溯到 AnalysisSpec、SQL、QueryResult 和数据范围。
-6. **边界透明**：系统明确说明当前能做什么、不能做什么以及为什么失败。
+1. 每次开始修改应用代码前，完整阅读本文件。
+2. 先为当前阶段建立从公开 API 进入的失败用例，再修改实现。
+3. 不得用增加 Prompt、关键词、业务表名或新 Agent 绕过主链迁移。
+4. 不得用 mock-only、direct function、SQLite-only、oracle 或文件存在证明线上阶段完成。
+5. 不得在前一阶段未通过全部硬验收时开始下一阶段。
+6. 不得把 `pytest` 全绿等同于产品可用；必须同时通过真实 API、真实 MySQL 和真人任务验收。
+7. 不得修改本文件的正确率阈值或验收定义来让实现过关；产品负责人书面确认后才能变更。
+8. 工作区包含大量未提交历史改动。只修改当前阶段涉及的文件，保留无关改动。
+9. 每阶段单独提交，提交前记录测试、API transcript、Trace ID 和失败样本。
+10. Recovery Phase 6 完成前，对外状态始终是：**未完成，禁止按可上线或可试点交付。**
 
 ---
 
-## 2. 首轮试点边界
+## 1. 产品目标与首轮边界
 
-### 2.1 支持范围
+### 1.1 最终目标
+
+小范围用户连接一套任意结构的 MySQL 数据库，系统自动完成建档和可用性检查；建档完成后，用户能够通过自然语言稳定完成常用指标查询、趋势、分组、对比和连续下钻，并得到可核对、可解释、失败可恢复的答案。
+
+### 1.2 首轮支持
 
 - 数据源：MySQL。
-- 数据库结构：不依赖固定表名、固定字段名或预置业务空间。
-- 接入方式：只读账号；连接后允许几十秒到数分钟的自动建档。
-- 支持的分析任务：
+- 数据库结构：不依赖固定表名、字段名或预置电商空间。
+- 连接方式：只读账号。
+- 建档：允许几十秒到两分钟的自动扫描。
+- 查询能力：
   - 表和字段用途理解；
-  - `COUNT / SUM / AVG / MIN / MAX` 等基础聚合；
+  - `COUNT / SUM / AVG / MIN / MAX`；
   - 明细筛选；
   - 时间趋势；
-  - 单维或多维分组；
+  - 单维和多维分组；
   - Top-N；
-  - 同比、环比或两个明确时间段对比；
+  - 两个明确时间段的对比；
   - 基于可信关系路径的多表查询；
-  - 对上一轮结果增加维度、修改时间、添加过滤和继续下钻。
+  - 对上一轮结果修改时间、增加维度、增加过滤和继续下钻。
 
-### 2.2 暂不承诺
+### 1.3 首轮不承诺
 
-- PostgreSQL、Oracle、SQL Server 等非 MySQL 数据源。
+- 非 MySQL 数据源。
 - 任意复杂 SQL 的自然语言等价能力。
-- 无可信关系路径时强行生成多表 JOIN。
-- 在缺少业务定义时自动发明 GMV、活跃用户、转化率等企业口径。
-- 把相关性包装成因果结论。
-- 无有效数据时生成深度诊断报告。
-- 面向大量用户或高并发的正式生产 SLA。
+- 没有可信关系路径时强行 JOIN。
+- 在没有业务定义时发明 GMV、活跃用户或转化率口径。
+- 把相关性写成因果关系。
+- 无有效查询数据时生成诊断报告。
+- 正式生产高并发 SLA。
 
-### 2.3 测试账号权限原则
+### 1.4 正确行为优先于强行回答
 
-- 小范围试点使用的测试账号必须拥有试点空间内所有已开放分析能力和业务数据的读取权限。
-- 账号可用性预检必须在进入试点前完成；不得让权限配置错误污染产品正确率评测。
-- 权限系统仍必须保留独立负向测试账号，验证越权拒绝和链路立即停止。
-- “测试账号全权限”不等于绕过 SQL 安全、空间隔离、字段脱敏、只读限制或审计。
+- 信息不足时主动澄清是正确结果。
+- 无法可靠关联时拒绝或询问是正确结果。
+- 权限拒绝、空结果和 SQL 拒绝必须向用户展示真实原因。
+- 猜测指标、时间、关系或数字，即使语言流畅，也属于错误答案。
 
 ---
 
-## 3. 产品主流程
+## 2. 当前真实状态
+
+### 2.1 已有且可复用的资产
+
+以下模块可以保留，但当前只能视为“组件资产”，不能视为线上能力：
+
+- `backend/app/agents/semantic_catalog.py`
+- `backend/app/agents/profiler.py`
+- `backend/app/agents/analysis_spec.py`
+- `backend/app/agents/analysis_pipeline.py`
+- `backend/app/agents/sql_compiler.py`
+- `backend/app/agents/query_outcome.py`
+- `backend/app/agents/active_analysis_state.py`
+- `backend/app/agents/spec_patch.py`
+- `backend/app/agents/controlled_loop.py`
+- `backend/app/agents/diagnosis_admission.py`
+- `backend/app/agents/diagnosis_pipeline.py`
+- `backend/app/agents/diagnosis_summary.py`
+- 现有授权、只读 SQL、空间隔离、审计、会话和前端基础。
+
+### 2.2 当前线上实际执行链
 
 ```text
-连接 MySQL
-  ↓
-连接与权限预检
-  ↓
-自动建档
-  ├─ 表、字段、注释、主键、外键、索引
-  ├─ 受控统计：空值率、基数、时间边界、有限样本特征
-  ├─ 表用途、字段角色、候选维度和候选度量
-  └─ 显式关系 + 高置信推断关系
-  ↓
-Readiness Report
-  ├─ READY：开放分析
-  ├─ DEGRADED：开放受限分析并说明限制
-  └─ BLOCKED：不开放分析并给出修复原因
-  ↓
-用户问题
-  ↓
-Supervisor 受控 observe → decide → act
-  ├─ 信息不足：clarify
-  ├─ 信息充分：生成 AnalysisSpec
-  ├─ 上下文追问：patch 上一轮 AnalysisSpec
-  └─ 不支持/失败：explain 或 stop
-  ↓
-Query Planner + SQL Compiler + SQL Guard
-  ↓
-QueryOutcome + Evidence Bundle
-  ↓
-可信答案 / 可操作的失败说明
-  ↓
-有充分证据时才允许进入 Insight / Report / Review
+/api/chat 或 /api/chat/stream
+  → backend/app/services/agent.py 的旧 LangGraph
+  → 旧 Supervisor 路由
+  → metric YAML / 旧 parser / 旧 working_memory
+  → 旧 SQL generator / Query executor
 ```
 
-数据库未达到 `READY` 或 `DEGRADED` 前，不允许用户进入普通分析链路。
+新 `SemanticCatalog → AnalysisSpec → Controlled Loop → ActiveAnalysisState` 尚未成为线上唯一主链。
+
+### 2.3 已复现的线上问题
+
+| 问题 | 已确认原因 |
+|---|---|
+| tester 查询 GMV 被拒绝 | `ecommerce.yml` 的 GMV roles 不含 tester；预检未成为真实准入门禁 |
+| “只看 paid”“按渠道拆”丢指标 | ActiveAnalysisState 只在离线 runner 使用，Chat Session 未持久化和恢复 |
+| 任意 MySQL 建档答非所问 | Profiler 主要解析离线 DDL，未形成 live information_schema → SemanticCatalog 主链 |
+| DELETE 被路由成 data_map | 写操作没有模型前的确定性 L0 拒绝 |
+| JSON 报告只返回“正在启动” | `/api/chat` 与 `/api/chat/stream` 业务语义不一致，完整编排只接在 stream |
+| `LLM 返回为空` | 旧 parser 的技术失败直接暴露，没有结构化降级 |
+| 385 测试通过但真人失败 | 测试集中验证组件和 runner，没有从公开 API 进入新内核 |
+
+### 2.4 历史阶段状态全部重置
+
+| 历史阶段 | 当前认定 |
+|---|---|
+| 原 Phase 0 | 评测脚手架存在；oracle 和 fixture 不能证明产品正确，人工一致性未完成 |
+| 原 Phase 1 | QueryOutcome 契约部分存在；真实 tester 预检和主 API 门禁失败 |
+| 原 Phase 2 | DDL 离线建档存在；真实 MySQL 建档与目录持久化未完成 |
+| 原 Phase 3 | 离线 AnalysisSpec 管线存在；线上 Chat 未接入 |
+| 原 Phase 4 | 离线连续追问存在；Session 持久化主链未接入 |
+| 原 Phase 5 | 诊断准入组件存在；所有公开入口未统一接入 |
+| 原 Phase 6 | 运维脚手架存在；真实试点准入未通过 |
+
+旧报告只能作为组件开发参考，不得直接恢复任何完成勾选。
 
 ---
 
-## 4. 核心架构
-
-### 4.1 连接与自动建档
-
-建档不是展示 Schema 列表，而是生成后续规划可直接消费的 `SemanticCatalog`。
-
-`SemanticCatalog` 至少包含：
-
-- 数据库身份和建档版本；
-- 全量表、字段、类型、注释、主键、显式外键和索引；
-- 表规模分级，不要求对大表执行无界 `COUNT(*)`；
-- 时间字段及可用数据时间边界；
-- 字段角色：标识符、时间、枚举维度、连续数值、金额、比例、状态、描述文本；
-- 候选度量及允许的聚合方式；
-- 显式关系和推断关系；
-- 每项推断的置信度、推断依据和风险；
-- 不可查询、敏感或需要用户确认的对象；
-- 建档产生时间和失效条件。
-
-关系推断必须遵守：
-
-1. 显式外键优先。
-2. 推断关系必须综合字段名、类型、唯一性、值覆盖率和表角色。
-3. 低置信关系不可用于自动 JOIN。
-4. 中置信关系必须先向用户确认或采用分开查询。
-5. 关系图发生 Schema 变更后必须失效并重建。
-
-### 4.2 AnalysisSpec：分析任务的唯一中间表示
-
-Supervisor 不直接写 SQL。每个可执行数据问题必须先形成结构化 `AnalysisSpec`：
+## 3. 唯一目标主链
 
 ```text
-AnalysisSpec {
-  task_type
-  subject
-  measures[] {
-    source_field
-    aggregation
-    business_label
-  }
-  dimensions[]
-  filters[]
-  time_range {
-    field
-    start
-    end
-    timezone
-  }
-  comparison
-  ordering
-  limit
-  required_tables[]
-  join_path[]
-  assumptions[]
-  unresolved_slots[]
-  confidence
-}
+Frontend / API Client
+  ├─ POST /api/chat
+  └─ POST /api/chat/stream
+            ↓
+AnalysisApplicationService.handle_turn(TurnRequest)
+            ↓
+1. Auth / Space / Session / Pilot Precheck
+2. Load or build live SemanticCatalog
+3. Load ActiveAnalysisState
+4. Supervisor controlled observe → decide → act
+5. Build or patch AnalysisSpec
+6. GuardedMySQLExecutor executes compiled SQL
+7. Produce QueryOutcome + EvidenceBundle
+8. Persist ActiveAnalysisState and artifacts
+9. Assemble answer or run admitted diagnosis
+            ↓
+Canonical TurnResult
+  ├─ JSON adapter returns once
+  └─ SSE adapter emits lifecycle events + exactly one terminal result
+```
+
+### 3.1 唯一应用服务
+
+必须建立一个与 HTTP 传输无关的应用入口，推荐位置：
+
+- `backend/app/application/analysis_service.py`
+- `backend/app/application/contracts.py`
+
+名称可以按现有项目规范调整，但必须满足：
+
+- JSON 和 SSE 调用同一个业务方法；
+- 业务方法不依赖 FastAPI Request 或 SSE 文本；
+- 返回统一 `TurnResult`；
+- streaming 只是观察业务事件的方式，不能拥有另一套业务逻辑；
+- 深度诊断、普通查询、澄清和失败都经过同一入口。
+
+### 3.2 统一输入输出契约
+
+`TurnRequest` 至少包含：
+
+```text
+question
+user_id
+user_role
+space_id
+session_id
+workspace_id
+selected_metric
+selected_query_type
+request_id
+```
+
+`TurnResult` 至少包含：
+
+```text
+response_type
+terminal_status
+message
+trace_id
+analysis_spec
+query_outcome
+evidence
+sql
+columns
+rows
+chart
+artifacts
+stop_reason
+active_state_version
+kernel_route
 ```
 
 约束：
 
-- `AnalysisSpec` 中的表、字段和关系必须能在当前 `SemanticCatalog` 中解析。
-- 用户没有提供的业务定义不得被模型写入 `assumptions` 后静默执行。
-- 所有时间值必须转换为确定的绝对范围并保留用户原始表达。
-- SQL 只能由已验证的 `AnalysisSpec` 编译或由受控规划器生成后再次验证。
-- 结果、图表、追问和报告都引用同一个 `AnalysisSpec`，避免各层口径漂移。
+- `kernel_route` 明确为 `analysis_kernel_v2` 或 `legacy_rollback`。
+- 试点流量必须使用 `analysis_kernel_v2`。
+- JSON 与 SSE 最终 `TurnResult` 的业务字段必须等价。
+- 用户看到的失败文本必须来自结构化 terminal status，不得由传输层猜测。
 
-### 4.3 信息充分性与主动澄清
+### 3.3 SSE 终止协议
 
-这是 Supervisor 的首要职责，不是 Query 执行失败后的补救。
+- 对外终止事件统一为 `complete`，一条请求必须且只能出现一次。
+- 内部 Graph、节点和 Agent 生命周期禁止再发送名为 `complete` 的事件。
+- `complete` 之后不得再发送业务事件。
+- 客户端只能在收到终止 `complete`、网络关闭或用户取消时结束。
+- 深度诊断的 `task_created`、`agent_progress`、`diagnosis_stopped` 是中间事件，不是最终答案。
 
-以下情况必须先澄清：
+### 3.4 Feature Flag 必须控制真实路由
 
-- 时间敏感指标没有明确时间范围，且当前会话不存在可继承的有效时间范围；
-- 指标名称对应多个字段或多种业务口径；
-- 分组维度存在多个候选字段；
-- 需要多表查询但存在多条同等置信度关系路径；
-- 用户要求“增长、下降、异常”但没有基准期或比较对象；
-- 用户要求原因或归因，但当前只有单张聚合结果，证据不足。
+现有 `analysis_kernel` flag 不能只出现在 `/api/pilot/status`。
 
-示例：
+- 开启：所有试点 Chat 请求进入新应用服务。
+- 关闭：进入明确标记的 `legacy_rollback`。
+- 回滚路径不得伪装成新内核。
+- 每个 Trace 记录使用的 kernel route。
+- 试点验收拒绝任何 `legacy_rollback` 样本。
+
+---
+
+## 4. 核心行为契约
+
+### 4.1 测试账号与权限预检
+
+- tester 在试点空间拥有全部已开放指标和业务数据读取权限。
+- 预检必须读取真实部署配置或数据库中的指标权限，不得使用测试内构造的 role map。
+- 预检失败时：
+  - 空间标记为 `BLOCKED_FOR_PILOT`；
+  - 不允许启动真人脚本；
+  - 返回缺失权限列表；
+  - 不通过修改评分规则继续测试。
+- 独立负向账号验证越权拒绝。
+- tester 全权限不绕过只读 SQL、空间隔离、敏感字段和审计。
+
+### 4.2 Live SemanticCatalog
+
+创建或刷新用户空间时：
 
 ```text
-用户：查询销售额
-系统：你想看哪个时间范围？当前数据库的数据覆盖 2025-01-01 至 2026-07-23。
-      可以选择最近 7 天、最近 30 天或自定义时间。
+information_schema + 受控统计
+  → LiveMySQLProfiler
+  → SemanticCatalog
+  → Readiness Report
+  → 持久化 catalog version
 ```
 
-澄清规则：
+目录必须包含：
 
-- 不允许静默使用“最近 30 天”等默认值。
-- 只询问阻塞执行的必要信息。
-- 问题必须引用建档得到的真实字段、数据时间边界或候选口径。
-- 用户回答后更新同一份 `AnalysisSpec`，不重新从零推断。
-- 如果上一轮已有有效时间范围，短追问默认继承并在答案中明确展示。
+- 表、字段、类型、注释、主键、外键和索引；
+- 时间字段与真实数据时间边界；
+- 候选度量、维度和字段角色；
+- 显式关系和带置信度的推断关系；
+- 敏感或不可查询字段；
+- schema fingerprint、创建时间和失效条件；
+- `READY / DEGRADED / BLOCKED`。
+
+离线 `profile_from_ddl` 可以保留为测试适配器，但线上不得从固定 DDL 或 seed 构建目录。
+
+### 4.3 AnalysisSpec 与主动澄清
+
+Supervisor 不直接写 SQL。每个数据问题必须形成或修改结构化 `AnalysisSpec`。
+
+必须澄清：
+
+- 时间敏感指标缺少明确时间，且会话中没有可继承时间；
+- 指标对应多个口径；
+- 维度对应多个字段；
+- 多表关系路径不唯一或置信度不足；
+- “增长、下降、异常”缺少比较基准；
+- “原因、归因”缺少足够证据。
+
+禁止：
+
+- 静默补“最近 30 天”；
+- 把“最近”解释为固定范围而不告知用户；
+- 把不存在的指标写入 assumptions 后执行；
+- 因为 LLM 返回空而直接展示技术错误。
 
 ### 4.4 受控 ReAct
 
-Supervisor 使用受控的 `observe → decide → act`，这属于 ReAct 思路，但不是无限循环或 Agent 自由互调。
-
-**Observe**
-
-- 当前用户问题；
-- 最近有效的 `AnalysisSpec`；
-- `SemanticCatalog` 的相关摘要；
-- 已有 QueryOutcome 和证据摘要；
-- 剩余调用次数和墙钟预算。
-
-**Decide**
+Supervisor 的动作只能来自：
 
 ```text
-next_action ∈ {
-  clarify,
-  build_spec,
-  patch_spec,
-  query,
-  relax_once,
-  explain_limit,
-  insight,
-  report,
-  review,
-  stop_success,
-  stop_empty,
-  stop_denied,
-  stop_error
-}
+clarify
+build_spec
+patch_spec
+query
+relax_once
+explain_limit
+admit_diagnosis
+insight
+report
+review
+stop_success
+stop_empty
+stop_denied
+stop_error
 ```
 
-**Act**
+规则：
 
-- 一次只执行一个允许动作；
-- 动作输出必须是结构化工件；
-- 每次动作后重新观察状态；
-- 达到终止状态或预算后立即停止；
-- Agent 不得互相调用，只有 Supervisor 能调度。
+- 一次执行一个动作；
+- 动作之间通过结构化工件交接；
+- Agent 不得互相调用；
+- 相同 Spec 指纹不得重复查询；
+- 达到调用或墙钟预算立即终止；
+- 普通查询和普通 follow-up 不唤醒 Insight、Report、Review 或 Export。
 
-Supervisor 不执行数据库工具，不读取凭证，不接收无限原始数据，不输出私有思维链。
+### 4.5 QueryOutcome
 
-### 4.5 QueryOutcome：链路控制的唯一事实
-
-Query 不能再用 `rows_count=0` 表示所有失败。每次查询必须返回以下互斥状态之一：
+每次真实查询必须返回以下互斥状态之一：
 
 ```text
 SUCCESS_WITH_DATA
@@ -254,348 +330,491 @@ TIMEOUT
 CANCELLED
 ```
 
-每个 QueryOutcome 必须包含：
-
-- 状态；
-- `AnalysisSpec` ID；
-- SQL 指纹和受控展示文本；
-- 行列数量；
-- 数据时间范围；
-- 错误码和安全的用户说明；
-- 是否允许重试；
-- 下一步允许动作；
-- Trace ID。
-
-调度规则：
-
-| QueryOutcome | Supervisor 行为 |
+| 状态 | 允许行为 |
 |---|---|
-| `SUCCESS_WITH_DATA` | 允许生成答案；用户明确要求且证据充分时才可进入 Insight |
-| `SUCCESS_EMPTY` | 最多 `relax_once`；仍为空则 `stop_empty` |
-| `PERMISSION_DENIED` | 立即 `stop_denied`，禁止调用其他 Agent |
-| `INVALID_REQUEST` | `clarify` 或 `explain_limit` |
-| `SQL_REJECTED` | 提供安全替代方案，禁止原 SQL 重试 |
-| `EXECUTION_ERROR` | 立即 `stop_error`，记录 Trace |
-| `TIMEOUT` | 取消下游动作，允许用户缩小范围后重试 |
-| `CANCELLED` | 终止全部下游任务 |
+| `SUCCESS_WITH_DATA` | 回答；用户明确要求且证据充分时允许诊断 |
+| `SUCCESS_EMPTY` | 最多受控放宽一次；仍为空则停止 |
+| `PERMISSION_DENIED` | 立即停止，不调用任何下游分析 Agent |
+| `INVALID_REQUEST` | 澄清或解释限制 |
+| `SQL_REJECTED` | 明确拒绝并提供安全替代方案 |
+| `EXECUTION_ERROR` | 停止并提供 Trace |
+| `TIMEOUT` | 取消下游，建议缩小范围 |
+| `CANCELLED` | 终止全部下游动作 |
 
-硬门禁：
+禁止把拒绝、异常或超时转换成 `rows=0`。
 
-- 没有 `SUCCESS_WITH_DATA`，Insight、Report 和 Review 均不得启动。
-- `PERMISSION_DENIED`、`SQL_REJECTED`、`EXECUTION_ERROR` 和 `TIMEOUT` 不得转换成空结果。
-- 同一 `AnalysisSpec` 最多执行一次受控放宽，禁止无限补查。
-- 前端必须显示真实终止原因，禁止使用“编排完成”代替失败结果。
+### 4.6 写操作 L0 安全拒绝
 
-### 4.6 Query Planner 与 SQL Compiler
-
-- LLM 负责理解问题和提出 `AnalysisSpec`，不拥有绕过目录与安全策略的自由 SQL 权限。
-- Planner 根据 `SemanticCatalog` 选择表、字段和关系路径。
-- Compiler 优先对支持范围内的聚合、过滤、趋势、分组、Top-N 和对比生成确定性 SQL。
-- 多表查询只能使用高置信关系路径；每条 JOIN 必须记录来源。
-- 无可信 JOIN 时，系统必须澄清、分开查询或说明当前无法可靠关联。
-- 最终 SQL 继续经过统一只读策略、空间隔离、复杂度、行数、时间和超时限制。
-
-### 4.7 会话状态
-
-会话不能只保存自然语言摘要。必须持久化 `ActiveAnalysisState`：
+在 LLM Supervisor 之前确定性识别：
 
 ```text
-ActiveAnalysisState {
-  last_analysis_spec_id
-  last_query_outcome_id
-  last_evidence_bundle_id
-  active_subject
-  measures[]
-  dimensions[]
-  filters[]
-  time_range
-  comparison
-  valid_until
-}
+INSERT
+UPDATE
+DELETE
+DROP
+ALTER
+TRUNCATE
+REPLACE
+CREATE
+GRANT
+REVOKE
 ```
 
-追问处理：
+明确写操作请求必须：
 
-- “按渠道拆一下”＝在上一份 Spec 增加渠道维度；
-- “换成最近 90 天”＝只替换时间范围；
-- “只看华东”＝追加过滤条件；
-- “为什么下降”＝先检查是否已有比较证据，没有则澄清或规划补查；
-- “报告结论一句话”＝读取已批准报告工件，不重新猜测。
+- 返回 `SQL_REJECTED`；
+- 说明系统只读；
+- 不进入 schema/data_map；
+- 不调用数据库；
+- 不依赖 LLM 分类结果。
 
-### 4.8 证据与报告
+### 4.7 ActiveAnalysisState
 
-- 普通答案必须引用 QueryResult 和 AnalysisSpec。
-- 每个数值结论必须能回溯到结果列、聚合和时间范围。
-- 因果词必须经过额外证据门禁；否则只能标记为相关性或待验证假设。
-- Report 只能消费已批准的 Evidence Bundle。
-- Review 拒绝时必须把拒绝原因作为最终状态返回用户。
-- Export 只渲染 Review 已批准的报告或允许导出的查询结果。
+每次成功分析或有效澄清后持久化：
+
+```text
+last_analysis_spec_id
+last_query_outcome_id
+last_evidence_bundle_id
+active_subject
+measures
+dimensions
+filters
+time_range
+comparison
+catalog_version
+state_version
+valid_until
+```
+
+追问行为：
+
+- “按渠道拆”继承指标和时间，只增加维度；
+- “只看 paid”继承指标和时间，只增加过滤；
+- “换成最近 90 天”只修改时间；
+- 上一轮失败但已有明确 AnalysisSpec 时，保留用户意图并明确失败状态；
+- Catalog 失效后，旧状态不得直接执行，必须重新解析或澄清；
+- 服务重启、刷新页面后可以继续追问。
+
+### 4.8 诊断准入
+
+在创建诊断任务之前执行：
+
+```text
+admit_diagnosis(last QueryOutcome, explicit intent)
+```
+
+没有 `SUCCESS_WITH_DATA`：
+
+- 不创建重型诊断任务；
+- 不调用 Insight、Report、Review、Export；
+- 直接返回证据缺口、权限问题或空结果原因。
+
+有数据时：
+
+- 每条关键结论引用 Evidence ID；
+- 证据不足的因果表述降级为假设；
+- 相同 evidence gap 最多补查一次；
+- Review 拒绝必须成为最终用户结果；
+- 诊断摘要和下一步建议写入 Session，可在后续追问中读取。
 
 ---
 
-## 5. Agent 边界
+## 5. Recovery 分阶段实施
 
-| 组件 | 责任 | 是否访问数据库 |
-|---|---|---|
-| Supervisor | 信息充分性判断、构建或修改 AnalysisSpec、受控调度、终止决策 | 否 |
-| Profiler | 自动建档并生成 SemanticCatalog | 仅元数据和受控统计 |
-| Query | 规划、编译、守卫和执行查询，产生 QueryOutcome | 是 |
-| Answer Assembly | 从 AnalysisSpec、QueryOutcome 和证据生成用户答案 | 否 |
-| Insight | 在已有证据中提取发现和证据缺口 | 否 |
-| Report | 基于批准证据撰写报告 | 否 |
-| Review | 检查口径、证据引用、越权和无依据结论 | 否 |
-| Export | 渲染已批准工件 | 否 |
+所有复选框在本文重写时均为未完成。后续模型只能在真实证据满足对应条目后勾选。
 
-禁止新增“看起来聪明但没有独立输入输出契约”的 Agent。优先完善状态、工件和门禁，而不是增加 Agent 数量。
+### Recovery Phase 0：建立真实黑盒基线
 
----
-
-## 6. 分阶段实施与验收
-
-后续阶段不得在前一阶段硬门禁未通过时开始。每个阶段必须提供自动化结果、真实 API 记录和失败案例证据。
-
-### Phase 0：重建评测基线
-
-**目标：** 先定义“正确”，停止使用“有回复就算成功”的评判方式。
+**目标：** 把已知问题固化成从公开 API 进入的可复现失败用例，停止“组件绿、产品红”。
 
 交付：
 
-- 至少 4 套结构显著不同的 MySQL 固定数据集：
-  - 有显式外键的规范化业务库；
-  - 无外键但可推断关系的业务库；
-  - 中文或非标准命名的库；
-  - 包含空表、稀疏数据、历史时间边界和歧义字段的库。
-- 每套数据库保存确定的 Ground Truth。
-- 不少于 120 个单轮任务和 40 条 3–5 轮连续任务。
-- 评测按任务结果、数值、口径、时间、维度、过滤、行为和证据分别打分。
+- `tests/integration` 或等价目录下的黑盒 API 测试；
+- 4 套真实 MySQL 测试 Schema；
+- 当前 18 轮真人脚本的严格评分器；
+- 新旧 kernel route 观测字段；
+- 历史报告标记为 `component_only` 或 `obsolete_for_release`。
 
 硬验收：
 
-- [ ] 任何“仅返回文本但未完成任务”的案例不得记为正确。
-- [ ] 权限拒绝、空结果、SQL 拒绝、超时和数据库异常分别计数。
-- [ ] 错误答案不得因措辞流畅获得正确分。
-- [ ] 自动评测结果可定位到数据库版本、用例 ID、SQL、结果和 Trace。
-- [ ] 人工抽检 30 个案例，自动评分与人工判断一致率不低于 95%。
+- [ ] 黑盒测试通过真实 FastAPI 路由进入，不直接调用 `run_analysis`、`run_turn` 或 `admit_diagnosis`。
+- [ ] 测试使用真实 MySQL fixture，不使用 SQLite executor。
+- [ ] tester GMV、追问继承、DELETE 拒绝、JSON/SSE 报告一致性、无数据诊断、任意 MySQL 建档均有失败复现。
+- [ ] 18 轮脚本不再用 HTTP 200 或“有文本”记为正确。
+- [ ] 每一轮记录期望行为、Ground Truth、terminal status、kernel route 和 Trace ID。
+- [ ] Phase 0 报告明确当前真实业务可用率，禁止使用 oracle 数字代替。
 
-### Phase 1：链路可靠性与终止状态
+### Recovery Phase 1：统一产品入口和链路终止
 
-**目标：** 先解决权限失败后仍继续跑 Agent、空证据生成报告和错误状态被吞的问题。
+**目标：** JSON、SSE 和前端全部经过唯一应用服务；先解决双链、权限、写操作和终止状态。
 
 交付：
 
-- QueryOutcome 状态契约；
-- Supervisor 显式状态机；
-- 下游证据门禁；
-- 超时、取消、单次放宽和调用预算；
-- 前端真实失败状态；
-- 试点测试账号全权限预检；
-- 独立的负向权限测试账号。
+- `AnalysisApplicationService` 和统一 contracts；
+- JSON/SSE 传输适配器；
+- `analysis_kernel` flag 真实路由；
+- tester 真实权限预检；
+- QueryOutcome 主链桥接；
+- L0 写操作拒绝；
+- exactly-once SSE terminal。
 
 硬验收：
 
-- [ ] 测试账号对试点开放数据和能力的预检通过率为 100%。
-- [ ] `PERMISSION_DENIED` 在 5 秒内终止，后续 Insight/Report/Review 调用数为 0。
-- [ ] `SUCCESS_EMPTY` 最多放宽一次；仍为空时 15 秒内终止。
-- [ ] `SQL_REJECTED`、`EXECUTION_ERROR`、`TIMEOUT` 均不会变成 `rows=0`。
-- [ ] 没有 `SUCCESS_WITH_DATA` 时生成 Report 的次数为 0。
-- [ ] Review 拒绝时用户看到明确理由，不出现“编排完成”。
-- [ ] 故障状态矩阵自动化用例通过率为 100%。
+- [ ] `/api/chat` 与 `/api/chat/stream` 对相同请求返回等价 terminal status、message、SQL、rows 和 stop reason。
+- [ ] 两个入口都记录 `kernel_route=analysis_kernel_v2`。
+- [ ] SSE 每个请求只出现一次 `complete`，且它是最后一个业务事件。
+- [ ] JSON 深度诊断不会返回“正在启动”，而是等待并返回最终停止或批准结果。
+- [ ] tester 对试点空间能力预检为 100%；否则试点被阻止。
+- [ ] 负向权限账号在 5 秒内 `PERMISSION_DENIED`，下游重型 Agent 调用数为 0。
+- [ ] DELETE 等写操作 100% 返回 `SQL_REJECTED`，数据库调用数为 0。
+- [ ] `SUCCESS_EMPTY` 最多放宽一次；拒绝、异常和超时不伪装为空结果。
+- [ ] 公开 API 故障状态矩阵行为正确率为 100%。
 
-### Phase 2：任意 MySQL 自动建档
+### Recovery Phase 2：真实 MySQL 自动建档
 
-**目标：** 去除对预置电商表名、指标 YAML 和业务规则库的首要依赖。
+**目标：** 让任意结构 MySQL 连接后生成主链可消费的 SemanticCatalog。
 
 交付：
 
-- 连接预检；
-- SemanticCatalog；
-- 关系图和置信度；
-- 时间覆盖、候选维度和候选度量识别；
-- READY / DEGRADED / BLOCKED Readiness Report；
-- Schema 变化后的目录失效与重建。
+- Live information_schema profiler；
+- 受控统计采集器；
+- Catalog repository 和版本管理；
+- Readiness API 与前端状态；
+- Schema 变化检测和重建。
 
 硬验收：
 
-- [ ] 4 套基准库的表和字段发现完整率为 100%。
-- [ ] 显式主键、外键和索引识别准确率为 100%。
+- [ ] 4 套真实 MySQL Schema 的表和字段发现完整率为 100%。
+- [ ] 显式主键、外键和索引发现准确率为 100%。
 - [ ] 高置信推断关系精确率不低于 95%；低置信关系自动 JOIN 次数为 0。
-- [ ] 时间字段识别和数据边界正确率不低于 95%。
-- [ ] 建档不得泄露数据库凭证，不得向模型发送无界原始数据。
-- [ ] 200 张表、3000 个字段以内的基准库在 120 秒内给出 Readiness Report。
-- [ ] BLOCKED 数据库不能进入分析；DEGRADED 必须明确列出受限能力。
+- [ ] 时间字段与真实数据边界识别准确率不低于 95%。
+- [ ] 建档不得向模型发送无界原始行，不得泄露凭证。
+- [ ] 200 张表、3000 字段以内在 120 秒内返回 Readiness。
+- [ ] `BLOCKED` 不能进入分析；`DEGRADED` 明确展示受限能力。
+- [ ] Catalog 持久化后可被 Chat 主链加载；不存在“建档成功但查询仍只读 YAML”的情况。
 
-### Phase 3：通用查询与主动澄清
+### Recovery Phase 3：线上通用查询与主动澄清
 
-**目标：** 在建档结果上稳定完成首轮支持范围内的通用分析。
+**目标：** 让公开 API 使用 SemanticCatalog、AnalysisSpec 和真实 MySQL executor 完成查询。
 
 交付：
 
-- AnalysisSpec；
-- 信息充分性检查；
-- 主动澄清；
-- Planner、Compiler 和 Guard；
-- 单表及可信关系路径多表查询；
-- Evidence Bundle 和统一答案。
+- live Planner；
+- AnalysisSpec validator；
+- GuardedMySQLExecutor；
+- EvidenceBundle；
+- 用户可见口径、时间和证据；
+- LLM 无效输出的确定性降级。
 
 硬验收：
 
-- [ ] 时间敏感指标缺少时间范围时，主动澄清正确率不低于 98%，静默补默认时间次数为 0。
-- [ ] 口径或关系有歧义时，主动澄清或拒绝率为 100%，不得猜测执行。
-- [ ] 支持范围内单轮任务的完整正确率不低于 95%。
+- [ ] 时间敏感指标缺少时间时，主动澄清正确率不低于 98%，静默默认时间次数为 0。
+- [ ] 口径或关系歧义时，澄清或拒绝率为 100%。
+- [ ] 120 个以上 API 单轮任务完整正确率不低于 95%。
 - [ ] 数值 Ground Truth 匹配率不低于 98%。
-- [ ] 高置信关系路径的多表任务正确率不低于 95%。
-- [ ] 越权、写操作、注入和不安全复杂查询阻断率为 100%。
-- [ ] 普通查询 P95 响应时间不高于 20 秒。
-- [ ] 每个成功答案都能展示实际时间范围、指标口径和证据来源。
+- [ ] 高置信关系路径多表任务正确率不低于 95%。
+- [ ] 越权、写操作、注入和不安全 SQL 阻断率为 100%。
+- [ ] 普通查询 P95 不高于 20 秒。
+- [ ] 每个成功答案展示实际时间范围、指标口径和证据来源。
+- [ ] 成功样本的 `kernel_route` 全部是 `analysis_kernel_v2`。
+- [ ] `ecommerce.yml` 等预置指标只能增强语义，删除预置后基础通用查询仍然可用。
 
-### Phase 4：连续追问与受控 ReAct
+### Recovery Phase 4：线上连续追问与 Session 恢复
 
-**目标：** 用户能围绕一次查询连续完成修改、下钻、对比和解释，不丢上下文。
+**目标：** ActiveAnalysisState 成为真实会话状态，而不是 runner 内变量。
 
 交付：
 
-- ActiveAnalysisState；
-- AnalysisSpec patch；
-- 受控 ReAct 动作循环；
-- 重复动作指纹和预算；
-- 会话刷新后的状态恢复。
+- ActiveAnalysisState repository；
+- Session load/save；
+- Spec patch 主链；
+- Catalog version 校验；
+- 刷新、重启和并发版本控制。
 
 硬验收：
 
-- [ ] 40 条连续任务的整链任务完成率不低于 95%。
-- [ ] “按设备/渠道拆开”“只看某区域”“换时间范围”正确继承上文指标的比例不低于 98%。
-- [ ] 上下文不足时主动澄清，错误继承比例低于 1%。
-- [ ] 相同 Spec 的无意义重复查询次数为 0。
-- [ ] 刷新会话后可以继续引用最近一次查询和已批准报告。
-- [ ] 普通 follow-up 不得唤醒 Report/Review/Export。
+- [ ] 40 条 3–5 轮 API 连续任务整链完成率不低于 95%。
+- [ ] 拆维、增加过滤和修改时间正确继承指标的比例不低于 98%。
+- [ ] 上下文不足时主动澄清；错误继承比例低于 1%。
+- [ ] 相同 Spec 无意义重复查询次数为 0。
+- [ ] 服务重启后继续追问成功。
+- [ ] 页面刷新后继续追问成功。
+- [ ] 普通 follow-up 不唤醒 Insight、Report、Review 或 Export。
+- [ ] Catalog 版本变化后不会使用过期字段执行 SQL。
 
-### Phase 5：证据诊断与报告
+### Recovery Phase 5：线上证据诊断和报告闭环
 
-**目标：** 在查询和连续分析稳定后，恢复真正有证据的诊断报告。
+**目标：** 只有真实有效证据才能进入诊断，并能在后续会话继续引用。
 
 交付：
 
-- 诊断准入检查；
+- 统一入口前置 diagnosis admission；
 - evidence gap 规划；
-- 受预算约束的补查；
-- Insight、Report、Review；
-- 报告回写会话和可追问摘要。
+- Report/Review 门禁；
+- DiagnosisSummary 持久化；
+- JSON/SSE/前端报告一致性。
 
 硬验收：
 
-- [ ] 无 `SUCCESS_WITH_DATA` 进入诊断链的次数为 0。
-- [ ] 每条关键结论的证据引用覆盖率为 100%。
-- [ ] 无证据的因果断言次数为 0；不充分结论明确标记为假设。
-- [ ] 同一证据缺口最多补查一次，重复补查次数为 0。
-- [ ] 有数诊断在 90 秒内给出批准报告或明确拒绝原因。
-- [ ] 诊断结束后，“一句话结论”和“下一步查什么”能够引用当前报告继续回答。
-- [ ] 诊断场景人工审核正确率不低于 90%，且不得以语言流畅度代替证据正确性。
+- [ ] 无 `SUCCESS_WITH_DATA` 创建重型诊断任务的次数为 0。
+- [ ] 无数据、权限拒绝和 SQL 拒绝在 15 秒内给出明确最终结果。
+- [ ] 每条关键报告结论证据引用覆盖率为 100%。
+- [ ] 无证据因果断言次数为 0。
+- [ ] 同一证据缺口最多补查一次。
+- [ ] 有数诊断在 90 秒内返回批准报告或明确拒绝原因。
+- [ ] JSON、SSE 和前端看到的报告状态与内容一致。
+- [ ] “一句话结论”和“下一步查什么”能够从 Session 中读取当前报告回答。
+- [ ] Review 未批准时不能生成可下载的最终报告。
 
-### Phase 6：小范围用户试点
+### Recovery Phase 6：真实小范围试点
 
-**目标：** 证明非开发人员可以在无人工陪跑情况下稳定完成真实任务。
+**目标：** 证明非开发用户能在无开发人员陪跑的情况下稳定完成工作。
 
-准入门禁：
+准入硬门禁：
 
-- [ ] Phase 0–5 全部硬验收通过并有可复现证据。
-- [ ] 连续 3 天运行完整离线评测，核心单轮正确率均不低于 95%。
-- [ ] 连续 3 天运行故障矩阵，错误终止行为正确率为 100%。
-- [ ] 完成认证、空间隔离、只读 SQL、敏感字段和审计专项检查。
-- [ ] 有功能开关、快速回滚、错误 Trace 和试点反馈入口。
+- [ ] Recovery Phase 0–5 全部通过真实证据验收。
+- [ ] 连续 3 个自然日分别运行完整 API + MySQL 评测，而不是一次循环三遍。
+- [ ] 三日核心单轮正确率每天均不低于 95%。
+- [ ] 三日公开 API 故障矩阵每天均为 100%。
+- [ ] tester 权限预检每天为 100%。
+- [ ] 认证、空间隔离、只读 SQL、敏感字段和审计专项通过。
+- [ ] 功能开关、真实路由切换、回滚和 Trace 反馈入口通过。
+- [ ] 试点样本中 `legacy_rollback` 数量为 0。
 
 试点方式：
 
-1. 先由 3–5 名内部非开发用户使用 5 个工作日。
-2. 内部门禁通过后扩展到 5–10 名目标业务用户。
-3. 每位用户使用自己的 MySQL 试点库，连接后先完成自动建档。
-4. 产品不承诺超出首轮支持范围的复杂分析；遇到不支持场景必须明确拒绝。
+1. 3–5 名内部非开发用户使用 5 个工作日。
+2. 每位用户连接一套真实 MySQL 试点库。
+3. 每套数据库先完成自动建档和 Readiness。
+4. 不支持的复杂分析必须明确拒绝，不能进入正确率分母的模糊区。
+5. 内部门禁通过后再扩展到 5–10 名目标业务用户。
 
 试点成功标准：
 
-- [ ] 用户核心任务无人工介入完成率不低于 90%。
-- [ ] 支持范围内任务的最终正确率不低于 95%。
+- [ ] 核心任务无人工介入完成率不低于 90%。
+- [ ] 支持范围任务最终完整正确率不低于 95%。
 - [ ] 高置信错误答案率低于 1%。
-- [ ] 因链路空转超过 90 秒且无有效结果的次数为 0。
-- [ ] P95 普通查询不高于 20 秒；有数诊断不高于 90 秒。
+- [ ] 空转超过 90 秒且无有效结果的次数为 0。
+- [ ] 普通查询 P95 不高于 20 秒；有数诊断 P95 不高于 90 秒。
 - [ ] 严重越权、数据泄露、写操作和跨空间访问事件为 0。
-- [ ] 试点用户能理解失败原因的比例不低于 90%。
+- [ ] 用户理解失败原因的比例不低于 90%。
+- [ ] 产品负责人基于真实试点报告明确确认通过。
 
-只有上述标准全部满足，产品负责人才能把状态从“未完成，禁止按可上线交付”改为“小范围试点通过”。这不等同于正式生产发布。
+只有全部满足，状态才能改为：**小范围试点通过，仍非正式生产发布。**
 
 ---
 
-## 7. 评测口径
+## 6. 真实验收与证据规范
 
-### 7.1 完整正确
+### 6.1 测试分层
 
-一个查询只有同时满足以下条件才计为正确：
+| 层级 | 用途 | 能否独立作为阶段完成证据 |
+|---|---|---|
+| Unit | 验证纯函数和单个契约 | 否 |
+| Component | 验证模块组合 | 否 |
+| Offline fixture | 验证确定性算法 | 否 |
+| Oracle | 验证评分器自身 | 否 |
+| API + real MySQL | 验证产品主链 | 是，必须 |
+| Frontend authenticated E2E | 验证用户实际入口 | Recovery 5–6 必须 |
+| Human task audit | 验证真实可用性 | Recovery 6 必须 |
 
-- 意图或澄清动作正确；
-- 使用正确的表和关系；
-- 指标及聚合口径正确；
+### 6.2 每份阶段报告必须包含
+
+```text
+phase
+commit_sha
+working_tree_status
+server_started_at
+server_version
+kernel_route
+api_endpoint
+mysql_version
+dataset_versions
+started_at
+ended_at
+case_count
+full_correct_rate
+value_match_rate
+failure_matrix_rate
+p50_ms
+p95_ms
+trace_ids
+failed_cases
+known_limits
+acceptance_checklist
+reviewer
+```
+
+缺少任一关键来源字段时，报告不能用于勾选阶段完成。
+
+### 6.3 完整正确
+
+一个查询只有同时满足以下条件才计为完整正确：
+
+- 行为正确：回答、澄清、拒绝或停止；
+- 表和关系正确；
+- 指标和聚合口径正确；
 - 时间范围和时区正确；
 - 过滤和维度正确；
-- 查询结果与 Ground Truth 一致；
-- 用户答案与结果一致；
-- 没有越权或无依据扩展。
+- SQL 安全；
+- 结果与 Ground Truth 一致；
+- 最终文本与结果一致；
+- 证据可追溯；
+- kernel route 是新主链。
 
-任一项错误，整题不得计为完整正确。
+任一项失败，整题不得记为完整正确。
 
-### 7.2 行为正确
+### 6.4 Phase 6 admission 必须校验内容
 
-信息不足时，正确行为是澄清；不支持时，正确行为是明确拒绝或解释限制。为了“给出一个答案”而猜测，不得计为成功。
+`collect_phase_evidence` 或替代实现必须：
 
-### 7.3 链路正确
-
-链路正确率独立统计：
-
-- 应停止时是否停止；
-- 应补查时是否只补查一次；
-- 应进入报告时是否具备证据；
-- 不相关 Agent 是否保持未调用；
-- 用户是否获得真实终止原因。
-
-### 7.4 发布报告
-
-每个阶段的验收报告必须记录：
-
-- 代码提交；
-- 数据集和用例版本；
-- 执行命令；
-- 总样本量；
-- 分场景结果；
-- 失败案例及 Trace；
-- P50/P95 延迟；
-- 已知限制；
-- 验收人和日期。
-
-不得只写“测试通过”或只引用 pytest 总数量。
+- 解析报告 JSON，而不是只检查文件存在；
+- 校验 commit SHA 与当前代码一致；
+- 校验所有 hard gates；
+- 拒绝 `component_only`、`oracle` 和 `offline_fixture` 作为产品证据；
+- 拒绝没有 Trace ID 的 API 报告；
+- 拒绝相同时间一次循环伪装的“连续三天”；
+- 拒绝包含 `legacy_rollback` 的试点样本；
+- 任何阶段失败时 `admission_pass=false`。
 
 ---
 
-## 8. 全局工程门禁
+## 7. API 与错误处理
 
-1. 行为修改必须遵循测试先行：失败测试 → 最小实现 → 回归 → 重构。
-2. 每个跨层行为至少包含契约测试和端到端场景测试。
-3. 前端修改必须通过生产构建和关键交互验证。
-4. 数据库迁移必须有升级、重复执行和失败恢复验证。
-5. 所有 Agent 事件只暴露安全状态，不暴露 Prompt、私有记忆、凭证、原始思维链或无界数据。
-6. 不得为了提高正确率只在评测集上增加业务关键词和固定表名。
-7. 不得在前一阶段门禁失败时通过增加 Agent、Prompt 或报告模板绕过根因。
-8. 工作区未提交代码、历史手测记录和旧测试数量不得作为已交付证据。
-9. 每次开始代码修改前，主执行者必须完整阅读本文件。
-10. 在 Phase 6 完成前，对外状态始终是：**未完成，禁止按可上线交付。**
+### 7.1 HTTP 状态与业务状态
+
+- HTTP 200 只表示请求被正常处理，不表示业务任务成功。
+- 业务成功与失败由 `terminal_status` 判断。
+- 客户端和评测器不得再用 HTTP 200 或非空文本作为成功标准。
+
+### 7.2 用户可见错误
+
+允许展示：
+
+- 权限不足；
+- 没有匹配数据；
+- 时间或指标信息不足；
+- 关系不可靠；
+- 只读系统拒绝写操作；
+- 查询超时；
+- 系统内部错误及 Trace ID。
+
+禁止展示：
+
+- `LLM 返回为空`；
+- JSON 解析异常；
+- Prompt；
+- Chain-of-thought；
+- 数据库凭证；
+- 原始堆栈；
+- “编排完成”这种掩盖失败的空话。
+
+### 7.3 模型降级
+
+LLM 超时、空输出或非法结构时：
+
+1. 记录结构化 `MODEL_TIMEOUT` 或 `MODEL_INVALID_OUTPUT`；
+2. 使用确定性 parser 或 validator 降级；
+3. 仍不能确定时提出具体澄清；
+4. 不允许生成猜测 SQL；
+5. 不允许把技术错误文本直接返回用户。
 
 ---
 
-## 9. 当前决策
+## 8. 后续模型的推荐执行顺序
 
-- 采用“保留安全、连接、会话和前端外围，重建分析内核”的路线。
-- 第一优先级是链路状态、终止门禁和测试账号权限预检。
-- 第二优先级是任意 MySQL 自动建档和 SemanticCatalog。
-- 第三优先级是 AnalysisSpec、主动澄清和通用查询。
-- 第四优先级是连续追问和受控 ReAct。
-- 深度诊断、GapCompiler、报告和导出必须排在基础查询稳定之后。
-- 现有 `ecommerce.yml` 等预置指标可以作为兼容或增强层保留，但不能是任意 MySQL 可用的前提。
-- Query 内部可以继续使用 LangGraph，但必须服从 AnalysisSpec、QueryOutcome 和统一安全边界。
-- 不采用 Agent 自由 Mesh，不以增加 Agent 数量替代状态机和证据契约。
+以下顺序不可颠倒：
+
+1. 建立 Recovery 0 黑盒失败测试，证明旧主链问题。
+2. 建立统一 `AnalysisApplicationService`，让 JSON/SSE 共享业务入口。
+3. 让 feature flag 真正切换主链，保留旧 Graph 仅作回滚。
+4. 接入真实 tester 权限预检、QueryOutcome 和写操作 L0 拒绝。
+5. 实现 live MySQL profiler 与 Catalog repository。
+6. 将 AnalysisSpec/Compiler 接入 GuardedMySQLExecutor。
+7. 将 ActiveAnalysisState 接入 Session 持久化。
+8. 将 diagnosis admission、summary 和报告回写接入统一入口。
+9. 重写 Phase 6 admission，使其解析真实报告内容。
+10. 最后运行真人脚本和小范围试点。
+
+明确禁止：
+
+- 在旧 `backend/app/services/agent.py` 上继续堆业务关键词作为主修复方案；
+- 同时维护两套独立的 JSON/SSE 业务链；
+- 用 preconfigured ecommerce happy path 代替任意 MySQL 验证；
+- 为通过评测专门识别固定 case 文案；
+- 在真实主链未接通前继续开发新的 Agent、PDF 样式或报告模板。
+
+---
+
+## 9. 关键文件处理原则
+
+### 9.1 应保留并接入
+
+- `backend/app/agents/query_outcome.py`
+- `backend/app/agents/semantic_catalog.py`
+- `backend/app/agents/analysis_spec.py`
+- `backend/app/agents/analysis_pipeline.py`
+- `backend/app/agents/sql_compiler.py`
+- `backend/app/agents/active_analysis_state.py`
+- `backend/app/agents/spec_patch.py`
+- `backend/app/agents/controlled_loop.py`
+- `backend/app/agents/diagnosis_admission.py`
+- `backend/app/agents/diagnosis_pipeline.py`
+- `backend/app/agents/diagnosis_summary.py`
+
+### 9.2 必须改为适配器或统一入口
+
+- `backend/app/api/chat.py`
+- `backend/app/api/connections.py`
+- `backend/app/api/spaces.py`
+- `backend/app/services/persistence.py`
+- `backend/app/services/db_connection_service.py`
+- `backend/app/pilot/admission.py`
+- `backend/app/pilot/multi_day_eval.py`
+- 前端 SSE 解析和 Chat complete 处理。
+
+### 9.3 旧 Graph
+
+`backend/app/services/agent.py`：
+
+- 在迁移期间保留为 `legacy_rollback`；
+- 不再作为新能力实现位置；
+- 新试点流量不得进入；
+- 主链迁移完成并稳定后，再另行设计删除或拆除计划；
+- 本轮不做大规模无关重构。
+
+### 9.4 预置指标
+
+`config/metrics.yml` 和 `config/metric_seeds/ecommerce.yml`：
+
+- 可以作为业务语义增强层；
+- 不得成为任意 MySQL 基础查询的前置条件；
+- tester 试点权限必须与开放能力一致；
+- 修改 YAML 后必须验证数据库中的已 seed 配置同步更新。
+
+---
+
+## 10. Definition of Done
+
+主链修复只有在以下条件全部满足时才算完成：
+
+- [ ] JSON、SSE、前端使用同一应用服务。
+- [ ] 试点请求全部记录 `analysis_kernel_v2`。
+- [ ] 任意 MySQL live 建档成为查询前置。
+- [ ] AnalysisSpec 和 QueryOutcome 贯穿实际查询。
+- [ ] ActiveAnalysisState 在真实 Session 中持久化。
+- [ ] 写操作在 L0 被明确拒绝。
+- [ ] tester 权限预检真实执行并通过。
+- [ ] 无数据或失败不能进入重型诊断。
+- [ ] 报告批准、拒绝和摘要能在会话中恢复。
+- [ ] API + real MySQL 单轮完整正确率不低于 95%。
+- [ ] API 连续追问整链完成率不低于 95%。
+- [ ] 所有安全阻断率为 100%。
+- [ ] 3 个自然日评测通过。
+- [ ] 3–5 名非开发用户 5 日试点通过。
+- [ ] 产品负责人确认“小范围试点通过”。
+
+在此之前，任何交接必须明确写：
+
+> **未完成，禁止按可上线或可试点交付。**
