@@ -1,0 +1,214 @@
+{
+  "status": "NOT_PILOT_READY",
+  "generated_at": "2026-07-26T06:54:50.663348+00:00",
+  "commit_sha": "c83df41ef1710be62d4a02d8144c71c8a8e09cb2",
+  "working_tree_clean": false,
+  "command": [
+    "/Users/luoweihao/Projects/datacheck/backend/.venv/bin/python",
+    "-m",
+    "pytest",
+    "-q",
+    "tests/semantic_gate",
+    "--junitxml=/var/folders/tf/hw65sj111x3cvvstx9cfvfdh0000gn/T/datapilot-semantic-gate-f8x4zt7b/junit.xml"
+  ],
+  "exit_code": 1,
+  "seeds": [
+    20260726,
+    731921,
+    904177
+  ],
+  "thresholds": {
+    "per_family_full_correct_rate": 0.95,
+    "value_match_rate": 0.98,
+    "explicit_identifier_grounding": 1.0,
+    "wrong_table_success": 0,
+    "ambiguity_handled": 1.0,
+    "followup_patch_correct": 0.98,
+    "changed_followup_wrong_reuse": 0,
+    "sensitive_raw_value_persisted": 0
+  },
+  "pytest": {
+    "totals": {
+      "tests": 52,
+      "failures": 28,
+      "errors": 0,
+      "skipped": 0
+    },
+    "failures": [
+      {
+        "case_id": "tests.semantic_gate.test_api_gate::test_real_mysql_service_scores_sql_spec_and_value_not_http_only",
+        "message": "live_semantic_service = (SchemaSuite(family='commerce', seed=217405411, ddl=\"CREATE TABLE `customers_fd4c` (\\n  `dimension_id_f091` BIGINT NOT...semantic_gate_commerce_217405411', <app.application.analysis_service.AnalysisApplicationService object at 0x109ddfb00>)\n\n    @pytest.mark.asyncio\n    async def test_real_mysql_service_scores_sql_spec_and_value_not_http_only(live_semantic_service):\n        suite, space, service = live_semantic_service\n        selected = [suite.single_turn_cases[0], suite.single_turn_cases[10], suite.single_turn_cases[14]]\n        failures = []\n        for index, case in enumerate(selected):\n            result = await service.handle_turn(_request(case.question, space, f\"api_gate_{index}\"))\n            public = result.to_public_dict()\n            spec = public.get(\"analysis_spec\")\n            if hasattr(spec, \"to_dict\"):\n                spec = spec.to_dict()\n            observation = SemanticObservation(\n                behavior=\"clarify\" if public.get(\"type\") == \"clarification\" else \"answer\",\n                terminal_status=str(public.get(\"terminal_status\") or \"\"),\n                sql=str(public.get(\"sql\") or \"\"),\n                spec=spec if isinstance(spec"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_api_gate::test_real_mysql_ground_truth_count_across_all_schema_families",
+        "message": "tmp_path = PosixPath('/private/var/folders/tf/hw65sj111x3cvvstx9cfvfdh0000gn/T/pytest-of-luoweihao/pytest-226/test_real_mysql_ground_truth_c0')\n\n    @pytest.mark.asyncio\n    async def test_real_mysql_ground_truth_count_across_all_schema_families(tmp_path):\n        failures = []\n        for suite in build_schema_suites():\n            with provision_suite(suite) as (cfg, database):\n                space = f\"gt_{suite.family}_{suite.seed}\"\n                catalog = profile_live_mysql(\n                    host=cfg.host,\n                    port=cfg.port,\n                    user=cfg.user,\n                    password=cfg.password,\n                    database=database,\n                    database_id=space,\n                )\n                root = tmp_path / suite.family\n                repo = CatalogRepository(root / \"catalog\")\n                repo.save(space, catalog)\n                register_space_connection(\n                    space,\n                    {\n                        \"host\": cfg.host,\n                        \"port\": cfg.port,\n                        \"user\": cfg.user,\n                        \"password\": cfg.password,\n                        \"database\": database,\n       "
+      },
+      {
+        "case_id": "tests.semantic_gate.test_followup_gate::test_real_anaphoric_followup_phrases_are_recognized",
+        "message": "def test_real_anaphoric_followup_phrases_are_recognized():\n>       assert looks_like_followup(\"那按商品分类看一下订单量前几名？\")\nE       AssertionError: assert False\nE        +  where False = looks_like_followup('那按商品分类看一下订单量前几名？')\n\ntests/semantic_gate/test_followup_gate.py:29: AssertionError AssertionError: assert False\n +  where False = looks_like_followup('那按商品分类看一下订单量前几名？')"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_followup_gate::test_changed_followup_produces_semantic_patch_not_reuse",
+        "message": "def test_changed_followup_produces_semantic_patch_not_reuse():\n        suite = next(s for s in build_schema_suites(DEFAULT_SEEDS[0]) if s.family == \"support\")\n        catalog, state = _state_for_suite(suite)\n        result = patch_or_build(\"其中失败的有多少？\", catalog, state)\n>       assert result.action == \"patch_spec\"\nE       AssertionError: assert 'build_spec' == 'patch_spec'\nE         \nE         - patch_spec\nE         + build_spec\n\ntests/semantic_gate/test_followup_gate.py:38: AssertionError AssertionError: assert 'build_spec' == 'patch_spec'\n  \n  - patch_spec\n  + build_spec"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_followup_gate::test_group_topn_followup_changes_dimension_order_and_limit",
+        "message": "def test_group_topn_followup_changes_dimension_order_and_limit():\n        suite = next(s for s in build_schema_suites(DEFAULT_SEEDS[0]) if s.family == \"commerce\")\n        catalog, state = _state_for_suite(suite)\n        question = f\"那按{suite.physical('group')}看前3名？\"\n        result = patch_or_build(question, catalog, state)\n>       assert result.action == \"patch_spec\"\nE       AssertionError: assert 'clarify' == 'patch_spec'\nE         \nE         - patch_spec\nE         + clarify\n\ntests/semantic_gate/test_followup_gate.py:49: AssertionError AssertionError: assert 'clarify' == 'patch_spec'\n  \n  - patch_spec\n  + clarify"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[20260726-commerce]",
+        "message": "seed = 20260726, family = 'commerce'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=commerce seed=20260726 full_rate=0.350; [\"case=commerce_single_01 family=commerce failed=['measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=commerce_single_03 family="
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[20260726-billing]",
+        "message": "seed = 20260726, family = 'billing'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=8; ['case=billing_single_00 family=billing failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'invoices_51a5\\'] actual_tables=[\\'activity_log_5a"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[20260726-support]",
+        "message": "seed = 20260726, family = 'support'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=8; ['case=support_single_00 family=support failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'tickets_6ad2\\'] actual_tables=[\\'activity_log_0a9"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[20260726-iot]",
+        "message": "seed = 20260726, family = 'iot'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=iot seed=20260726 full_rate=0.250; [\"case=iot_single_01 family=iot failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=iot"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[20260726-warehouse]",
+        "message": "seed = 20260726, family = 'warehouse'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=2; [\"case=warehouse_single_00 family=warehouse failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=warehouse_single_01 family=warehouse failed=['behavior', 'subject_table', 'sql_tables', 'measure"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[20260726-ambiguous]",
+        "message": "seed = 20260726, family = 'ambiguous'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=ambiguous seed=20260726 full_rate=0.100; [\"case=ambiguous_single_01 family=ambiguous failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measur"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[731921-commerce]",
+        "message": "seed = 731921, family = 'commerce'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=commerce seed=731921 full_rate=0.450; [\"case=commerce_single_01 family=commerce failed=['measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=commerce_single_03 family=comm"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[731921-billing]",
+        "message": "seed = 731921, family = 'billing'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=8; ['case=billing_single_00 family=billing failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'invoices_de5a\\'] actual_tables=[\\'activity_log_6e61"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[731921-support]",
+        "message": "seed = 731921, family = 'support'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=8; ['case=support_single_00 family=support failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'tickets_758d\\'] actual_tables=[\\'activity_log_85a0\\"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[731921-iot]",
+        "message": "seed = 731921, family = 'iot'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=8; ['case=iot_single_00 family=iot failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'x_1153\\'] actual_tables=[\\'x_de9d\\']\"]', \"case=iot_single_01 fa"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[731921-warehouse]",
+        "message": "seed = 731921, family = 'warehouse'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=2; [\"case=warehouse_single_00 family=warehouse failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=warehouse_single_01 family=warehouse failed=['behavior', 'subject_table', 'sql_tables', 'measures'"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[731921-ambiguous]",
+        "message": "seed = 731921, family = 'ambiguous'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=ambiguous seed=731921 full_rate=0.100; [\"case=ambiguous_single_01 family=ambiguous failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] "
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[904177-commerce]",
+        "message": "seed = 904177, family = 'commerce'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=commerce seed=904177 full_rate=0.350; [\"case=commerce_single_01 family=commerce failed=['measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=commerce_single_03 family=comm"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[904177-billing]",
+        "message": "seed = 904177, family = 'billing'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=billing seed=904177 full_rate=0.250; [\"case=billing_single_01 family=billing failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[904177-support]",
+        "message": "seed = 904177, family = 'support'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=8; ['case=support_single_00 family=support failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'tickets_37cd\\'] actual_tables=[\\'activity_log_ae5c\\"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[904177-iot]",
+        "message": "seed = 904177, family = 'iot'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=iot seed=904177 full_rate=0.250; [\"case=iot_single_01 family=iot failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]\", \"case=iot_sin"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[904177-warehouse]",
+        "message": "seed = 904177, family = 'warehouse'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n        assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\n>       assert full_rate >= 0.95, f\"family={family} seed={seed} full_rate={full_rate:.3f}; {failures}\"\nE       AssertionError: family=warehouse seed=904177 full_rate=0.150; [\"case=warehouse_single_00 family=warehouse failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] "
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_unseen_schema_planner_family_gate[904177-ambiguous]",
+        "message": "seed = 904177, family = 'ambiguous'\n\n    @pytest.mark.parametrize(\n        \"seed,family\",\n        [(seed, family) for seed in GATE_SEEDS for family in (\"commerce\", \"billing\", \"support\", \"iot\", \"warehouse\", \"ambiguous\")],\n    )\n    def test_unseen_schema_planner_family_gate(seed: int, family: str):\n        suite = next(s for s in build_schema_suites(seed) if s.family == family)\n        scores = [_observe(suite, case) for case in suite.single_turn_cases]\n        wrong_table = sum(\n            \"wrong_subject_table\" in score.hard_failures or \"wrong_sql_tables\" in score.hard_failures\n            for score in scores\n        )\n        full_rate = sum(score.full_correct for score in scores) / len(scores)\n        failures = [score.explain() for score in scores if not score.full_correct][:8]\n>       assert wrong_table == 0, f\"wrong-table successful answers={wrong_table}; {failures}\"\nE       AssertionError: wrong-table successful answers=3; ['case=ambiguous_single_00 family=ambiguous failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject_table\\', \\'wrong_sql_tables\\', \\'missing_or_wrong_measure\\'] notes=[\"expected_tables=[\\'x_eefc\\'] actual_tables=[\\'x_18ba\\']\"]', \"cas"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_explicit_table_identifier_grounding_is_100_percent[20260726]",
+        "message": "seed = 20260726\n\n    @pytest.mark.parametrize(\"seed\", GATE_SEEDS)\n    def test_explicit_table_identifier_grounding_is_100_percent(seed: int):\n        failures = []\n        total = 0\n        for suite in build_schema_suites(seed):\n            physical = suite.physical(\"fact\")\n            for case in suite.single_turn_cases:\n                if physical not in case.question:\n                    continue\n                total += 1\n                score = _observe(suite, case)\n                if not score.dimensions[\"subject_table\"]:\n                    failures.append(score.explain())\n        assert total >= 30\n>       assert not failures, failures[:10]\nE       AssertionError: ['case=billing_single_00 family=billing failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject...\\'missing_or_wrong_filter\\'] notes=[\"expected_tables=[\\'invoices_51a5\\'] actual_tables=[\\'activity_log_5a7a\\']\"]', ...]\nE       assert not ['case=billing_single_00 family=billing failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject...\\'missing_or_wrong_filter\\'] notes=[\"expected_tables=[\\'invoices_51a5\\'] actual_tables=[\\'activity_log_5a7a\\']\"]', ...]\n\ntests/semantic_g"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_explicit_table_identifier_grounding_is_100_percent[731921]",
+        "message": "seed = 731921\n\n    @pytest.mark.parametrize(\"seed\", GATE_SEEDS)\n    def test_explicit_table_identifier_grounding_is_100_percent(seed: int):\n        failures = []\n        total = 0\n        for suite in build_schema_suites(seed):\n            physical = suite.physical(\"fact\")\n            for case in suite.single_turn_cases:\n                if physical not in case.question:\n                    continue\n                total += 1\n                score = _observe(suite, case)\n                if not score.dimensions[\"subject_table\"]:\n                    failures.append(score.explain())\n        assert total >= 30\n>       assert not failures, failures[:10]\nE       AssertionError: ['case=billing_single_00 family=billing failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject...\\'missing_or_wrong_filter\\'] notes=[\"expected_tables=[\\'invoices_de5a\\'] actual_tables=[\\'activity_log_6e61\\']\"]', ...]\nE       assert not ['case=billing_single_00 family=billing failed=[\\'subject_table\\', \\'sql_tables\\', \\'measures\\'] hard=[\\'wrong_subject...\\'missing_or_wrong_filter\\'] notes=[\"expected_tables=[\\'invoices_de5a\\'] actual_tables=[\\'activity_log_6e61\\']\"]', ...]\n\ntests/semantic_gat"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_planner_gate::test_explicit_table_identifier_grounding_is_100_percent[904177]",
+        "message": "seed = 904177\n\n    @pytest.mark.parametrize(\"seed\", GATE_SEEDS)\n    def test_explicit_table_identifier_grounding_is_100_percent(seed: int):\n        failures = []\n        total = 0\n        for suite in build_schema_suites(seed):\n            physical = suite.physical(\"fact\")\n            for case in suite.single_turn_cases:\n                if physical not in case.question:\n                    continue\n                total += 1\n                score = _observe(suite, case)\n                if not score.dimensions[\"subject_table\"]:\n                    failures.append(score.explain())\n        assert total >= 30\n>       assert not failures, failures[:10]\nE       AssertionError: [\"case=billing_single_01 family=billing failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_...upport failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]\", ...]\nE       assert not [\"case=billing_single_01 family=billing failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_...upport failed=['behavior', 'subject_table', 'sql_tables', 'measures'] hard=['missing_or_wrong_measure'] notes=[]\", ...]\n\ntests/semantic_gat"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_profiler_gate::test_profiler_emits_bounded_evidence_status_vocabulary_and_sample_strategy",
+        "message": "def test_profiler_emits_bounded_evidence_status_vocabulary_and_sample_strategy():\n        suite = next(s for s in build_schema_suites() if s.family == \"support\")\n        with provision_suite(suite) as (cfg, database):\n            catalog = profile_live_mysql(\n                host=cfg.host,\n                port=cfg.port,\n                user=cfg.user,\n                password=cfg.password,\n                database=database,\n                database_id=suite.family,\n            )\n        status = _column(catalog, suite.physical(\"status\"))\n>       assert hasattr(status, \"profile\"), \"ColumnProfile must carry bounded profile evidence\"\nE       AssertionError: ColumnProfile must carry bounded profile evidence\nE       assert False\nE        +  where False = hasattr(ColumnProfile(name='state_d6ea', data_type='varchar', nullable=False, comment='', role='status', sensitive=False, is_primary_key=False, is_foreign_key=False), 'profile')\n\ntests/semantic_gate/test_profiler_gate.py:31: AssertionError AssertionError: ColumnProfile must carry bounded profile evidence\nassert False\n +  where False = hasattr(ColumnProfile(name='state_d6ea', data_type='varchar', nullable=False, comment='', role='status',"
+      },
+      {
+        "case_id": "tests.semantic_gate.test_profiler_gate::test_profiler_records_budget_and_evidence_source",
+        "message": "def test_profiler_records_budget_and_evidence_source():\n        suite = next(s for s in build_schema_suites() if s.family == \"billing\")\n        with provision_suite(suite) as (cfg, database):\n            catalog = profile_live_mysql(\n                host=cfg.host,\n                port=cfg.port,\n                user=cfg.user,\n                password=cfg.password,\n                database=database,\n                database_id=suite.family,\n            )\n        public = catalog.to_public_dict()\n>       assert public.get(\"profiling_policy\", {}).get(\"read_only\") is True\nE       AssertionError: assert None is True\nE        +  where None = <built-in method get of dict object at 0x109ee4380>('read_only')\nE        +    where <built-in method get of dict object at 0x109ee4380> = {}.get\nE        +      where {} = <built-in method get of dict object at 0x109e1d4c0>('profiling_policy', {})\nE        +        where <built-in method get of dict object at 0x109e1d4c0> = {'candidate_dimensions': [{'field': 'log_state_ea0c', 'role': 'status', 'table': 'activity_log_5a7a'}, {'field': 'logg... 'total_due_8aa5', 'role': 'continuous_numeric', ...}], 'created_at': 1785048890.460717, 'database_id': 'bill"
+      }
+    ],
+    "hard_failures": {
+      "wrong_subject_table": 58,
+      "wrong_sql_tables": 58,
+      "missing_or_wrong_measure": 246,
+      "missing_or_wrong_filter": 34,
+      "missing_or_wrong_dimension": 0,
+      "wrong_reuse_decision": 0,
+      "guessed_when_clarification_required": 6,
+      "sensitive_raw_value_persisted": 0
+    },
+    "families": {
+      "ambiguous": {
+        "tests": 3,
+        "failed": 3,
+        "observed_full_correct_rates": [
+          0.1,
+          0.1
+        ],
+        "minimum_observed_full_correct_rate": 0.1
+      },
+      "billing": {
+        "tests": 3,
+        "failed": 3,
+        "observed_full_correct_rates": [
+          0.25
+        ],
+        "minimum_observed_full_correct_rate": 0.25
+      },
+      "commerce": {
+        "tests": 3,
+        "failed": 3,
+        "observed_full_correct_rates": [
+          0.35,
+          0.45,
+          0.35
+        ],
+        "minimum_observed_full_correct_rate": 0.35
+      },
+      "iot": {
+        "tests": 3,
+        "failed": 3,
+        "observed_full_correct_rates": [
+          0.25,
+          0.25
+        ],
+        "minimum_observed_full_correct_rate": 0.25
+      },
+      "support": {
+        "tests": 3,
+        "failed": 3,
+        "observed_full_correct_rates": [],
+        "minimum_observed_full_correct_rate": null
+      },
+      "warehouse": {
+        "tests": 3,
+        "failed": 3,
+        "observed_full_correct_rates": [
+          0.15
+        ],
+        "minimum_observed_full_correct_rate": 0.15
+      }
+    }
+  }
+}
