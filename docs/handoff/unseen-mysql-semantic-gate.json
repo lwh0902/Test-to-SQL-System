@@ -1,7 +1,7 @@
 {
   "status": "READY_FOR_INTERNAL_PILOT",
-  "generated_at": "2026-07-26T07:28:58.592396+00:00",
-  "commit_sha": "ec708f5bfbb0a3bcad8519e4977b8ad6e1657a3f",
+  "generated_at": "2026-07-26T07:29:05.306400+00:00",
+  "commit_sha": "9048001bb8ddc65c288f361e6b293a9f8d4c4e79",
   "working_tree_clean": true,
   "command": [
     "/Users/luoweihao/Projects/datacheck/backend/.venv/bin/python",
@@ -9,7 +9,7 @@
     "pytest",
     "-q",
     "tests/semantic_gate",
-    "--junitxml=/var/folders/tf/hw65sj111x3cvvstx9cfvfdh0000gn/T/datapilot-semantic-gate-u0ibo1v8/junit.xml"
+    "--junitxml=/var/folders/tf/hw65sj111x3cvvstx9cfvfdh0000gn/T/datapilot-semantic-gate-rpx809nh/junit.xml"
   ],
   "exit_code": 0,
   "seeds": [
