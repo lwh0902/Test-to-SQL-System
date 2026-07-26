@@ -104,36 +104,53 @@ async def dispatcher_agent_call(
     async def _run():
         return await d.deliver(msg)
 
-    async for item in deliver_with_progress(_run):
-        if item.get("type") == "result":
-            val = item.get("value")
-            if isinstance(val, dict):
-                # stamp transport metadata (non-sensitive)
-                payload_out = val.get("payload") if isinstance(val.get("payload"), dict) else {}
-                if isinstance(payload_out, dict):
-                    payload_out = {
-                        **payload_out,
-                        "_transport": TRANSPORT,
-                        "_evidence_class": EVIDENCE_CLASS,
-                    }
-                    val = {**val, "payload": payload_out}
-            yield {"type": "result", "value": val}
-        elif item.get("type") == "error":
-            err = item.get("error")
+    error_emitted = False
+    try:
+        async for item in deliver_with_progress(_run):
+            if item.get("type") == "result":
+                val = item.get("value")
+                if isinstance(val, dict):
+                    # stamp transport metadata (non-sensitive)
+                    payload_out = val.get("payload") if isinstance(val.get("payload"), dict) else {}
+                    if isinstance(payload_out, dict):
+                        payload_out = {
+                            **payload_out,
+                            "_transport": TRANSPORT,
+                            "_evidence_class": EVIDENCE_CLASS,
+                        }
+                        val = {**val, "payload": payload_out}
+                yield {"type": "result", "value": val}
+            elif item.get("type") == "error":
+                err = item.get("error")
+                error_emitted = True
+                yield {
+                    "type": "result",
+                    "value": {
+                        "artifact_id": "",
+                        "payload": {
+                            "error": str(err),
+                            "stop_reason": "STOP_ERROR",
+                        },
+                        "error": str(err),
+                        "stop_reason": "STOP_ERROR",
+                    },
+                }
+            else:
+                yield item
+    except Exception as err:
+        # deliver_with_progress intentionally re-raises after its error event.
+        # The diagnosis pipeline needs a terminal value so it can choose a
+        # bounded fallback instead of turning an agent timeout into HTTP 500.
+        if not error_emitted:
             yield {
                 "type": "result",
                 "value": {
                     "artifact_id": "",
-                    "payload": {
-                        "error": str(err),
-                        "stop_reason": "STOP_ERROR",
-                    },
+                    "payload": {"error": str(err), "stop_reason": "STOP_ERROR"},
                     "error": str(err),
                     "stop_reason": "STOP_ERROR",
                 },
             }
-        else:
-            yield item
 
 
 # alias

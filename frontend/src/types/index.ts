@@ -1,4 +1,13 @@
-export const CHAT_RESPONSE_TYPES = ['answer', 'clarification', 'error', 'chat', 'help', 'schema_help', 'data_map'] as const;
+export const CHAT_RESPONSE_TYPES = [
+  'answer',
+  'clarification',
+  'error',
+  'chat',
+  'help',
+  'schema_help',
+  'data_map',
+  'deep_diagnosis',
+] as const;
 
 export interface TimeRange {
   start: string;
@@ -29,14 +38,29 @@ export interface MetricCandidate {
   default_time_range: string;
 }
 
+export interface ChatNextAction {
+  id: string;
+  label: string;
+}
+
 export interface ChatResponse {
-  type: 'answer' | 'clarification' | 'error' | 'chat' | 'help' | 'schema_help' | 'data_map';
+  type:
+    | 'answer'
+    | 'clarification'
+    | 'error'
+    | 'chat'
+    | 'help'
+    | 'schema_help'
+    | 'data_map'
+    | 'deep_diagnosis'
+    | string;
   trace_id: string;
   answer: string | null;
   intent: QueryIntent | null;
   sql: string | null;
   columns: string[];
   rows: Record<string, unknown>[];
+  rows_count?: number | null;
   chart: ChartConfig | null;
   trace: TraceStep[];
   message: string | null;
@@ -45,6 +69,19 @@ export interface ChatResponse {
   plan_results?: PlanResult[];
   data_map?: import('../services/api').DataMap;
   db_identity?: DbIdentity;
+  /** Canonical terminal fields */
+  terminal_status?: string | null;
+  stop_reason?: string | null;
+  kernel_route?: string | null;
+  task_id?: string | null;
+  evidence?: Record<string, unknown> | null;
+  artifacts?: Array<Record<string, unknown>>;
+  query_outcome?: Record<string, unknown> | null;
+  supervisor_decision?: Record<string, unknown> | null;
+  task_spec?: Record<string, unknown> | null;
+  clarify_slots?: string[];
+  ux_hints?: string[];
+  next_actions?: ChatNextAction[];
 }
 
 export interface DbIdentity {

@@ -16,6 +16,10 @@ class Measure:
     aggregation: str = "sum"  # sum|avg|min|max|count
     business_label: str = ""
     table: str = ""
+    # A measure-local predicate is required for compound requests such as
+    # "total rows and failed rows".  Global filters would incorrectly filter
+    # both measures and make the total equal the failed count.
+    filter: Optional["FilterExpr"] = None
 
 
 @dataclass
@@ -95,6 +99,15 @@ def validate_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> SpecValidatio
         agg = (m.aggregation or "").lower()
         if agg not in {"sum", "avg", "min", "max", "count", "rate"}:
             errors.append(f"bad_aggregation:{agg}")
+        if m.filter is not None:
+            mf = m.filter
+            filter_table = mf.table or table
+            if filter_table not in tmap:
+                errors.append(f"measure_filter_table_missing:{filter_table}")
+            elif mf.field not in {c.name for c in tmap[filter_table].columns}:
+                errors.append(f"measure_filter_field_missing:{filter_table}.{mf.field}")
+            if mf.op not in {"=", "!=", ">", "<", ">=", "<=", "LIKE", "in"}:
+                errors.append(f"measure_filter_bad_op:{mf.op}")
     if spec.time_range:
         tr = spec.time_range
         table = spec.required_tables[0] if spec.required_tables else ""

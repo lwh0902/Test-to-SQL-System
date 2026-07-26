@@ -117,6 +117,16 @@ def spec_from_parts(
             aggregation=m.get("aggregation", "sum"),
             business_label=m.get("business_label", ""),
             table=m.get("table", ""),
+            filter=(
+                FilterExpr(
+                    field=(m.get("filter") or {}).get("field", ""),
+                    op=(m.get("filter") or {}).get("op", "="),
+                    value=(m.get("filter") or {}).get("value"),
+                    table=(m.get("filter") or {}).get("table", ""),
+                )
+                if isinstance(m.get("filter"), dict)
+                else None
+            ),
         )
         for m in measures
     ]

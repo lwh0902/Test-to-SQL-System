@@ -26,6 +26,17 @@ def _qident(name: str) -> str:
     return f"`{n}`"
 
 
+def _filter_condition_sql(filter_expr: Any, default_table: str) -> str:
+    table = filter_expr.table or default_table
+    op = filter_expr.op or "="
+    value = filter_expr.value
+    if isinstance(value, str):
+        literal = "'" + value.replace("'", "''") + "'"
+    else:
+        literal = str(value)
+    return f"{_qident(table)}.{_qident(filter_expr.field)} {op} {literal}"
+
+
 def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
     v = validate_spec(spec, catalog)
     if not v.ok:
@@ -50,23 +61,51 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
     join_sources: list[str] = []
     base = tables[0]
     joined = {base}
+
+    def _append_join(src_table: str, src_column: str, dst_table: str, dst_column: str, source: str, confidence: float) -> bool:
+        """JOIN the side not yet present; never re-JOIN the FROM base as alias-less duplicate."""
+        nonlocal join_sql
+        src_in = src_table in joined
+        dst_in = dst_table in joined
+        if src_in and dst_in:
+            return True
+        if not src_in and not dst_in:
+            # attach dst onto base graph only if one endpoint is base-adjacent later
+            # Prefer joining dst if src is base, else join src.
+            if src_table == base:
+                other, left_t, left_c, right_t, right_c = dst_table, src_table, src_column, dst_table, dst_column
+            elif dst_table == base:
+                other, left_t, left_c, right_t, right_c = src_table, src_table, src_column, dst_table, dst_column
+            else:
+                other, left_t, left_c, right_t, right_c = dst_table, src_table, src_column, dst_table, dst_column
+        elif src_in and not dst_in:
+            other, left_t, left_c, right_t, right_c = dst_table, src_table, src_column, dst_table, dst_column
+        else:  # dst_in and not src_in — edge stored child→parent while FROM is parent
+            other, left_t, left_c, right_t, right_c = src_table, src_table, src_column, dst_table, dst_column
+        if other in joined:
+            return True
+        join_sql += (
+            f" JOIN {_qident(other)} ON {_qident(left_t)}.{_qident(left_c)}"
+            f" = {_qident(right_t)}.{_qident(right_c)}"
+        )
+        joined.add(other)
+        join_sources.append(f"{source}:{confidence}")
+        return True
+
     for step in spec.join_path:
         if step.confidence < 0.85 and step.source != "user":
             used_low = True
             return CompileResult(ok=False, errors=["low_confidence_join_blocked"], used_auto_low_join=True)
         if not policy.can_auto_join(step.src_table, step.dst_table) and step.confidence < 0.85:
             return CompileResult(ok=False, errors=["join_not_allowed"], used_auto_low_join=False)
-        # add join
-        other = step.dst_table if step.src_table in joined else step.src_table
-        if other in joined:
-            continue
-        join_sql += (
-            f" JOIN {_qident(step.dst_table)} ON {_qident(step.src_table)}.{_qident(step.src_column)}"
-            f" = {_qident(step.dst_table)}.{_qident(step.dst_column)}"
+        _append_join(
+            step.src_table,
+            step.src_column,
+            step.dst_table,
+            step.dst_column,
+            step.source,
+            step.confidence,
         )
-        joined.add(step.dst_table)
-        joined.add(step.src_table)
-        join_sources.append(f"{step.source}:{step.confidence}")
 
     # if multi table without join_path — require high conf path or fail
     if len(tables) > 1 and not spec.join_path:
@@ -75,44 +114,56 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
         edge = policy.join_path(a, b)
         if not edge:
             return CompileResult(ok=False, errors=["missing_join_path"])
-        join_sql += (
-            f" JOIN {_qident(edge.dst_table)} ON {_qident(edge.src_table)}.{_qident(edge.src_column)}"
-            f" = {_qident(edge.dst_table)}.{_qident(edge.dst_column)}"
+        _append_join(
+            edge.src_table,
+            edge.src_column,
+            edge.dst_table,
+            edge.dst_column,
+            getattr(edge, "kind", "inferred"),
+            edge.confidence,
         )
-        join_sources.append(f"{edge.kind}:{edge.confidence}")
 
     select_parts = []
     rate_filters = list(spec.filters or [])
-    for m in spec.measures:
+    consumed_global_filter_indexes: set[int] = set()
+    multiple_measures = len(spec.measures) > 1
+    for measure_index, m in enumerate(spec.measures):
         agg = (m.aggregation or "sum").upper()
         table = m.table or base
+        alias_name = (
+            re.sub(r"[^A-Za-z0-9_\u4e00-\u9fff]", "_", m.business_label or "")
+            if multiple_measures
+            else "value"
+        ) or f"value_{measure_index + 1}"
+        alias_sql = _qident(alias_name) if multiple_measures else "value"
         if agg == "COUNT":
-            select_parts.append("COUNT(*) AS value")
+            if m.filter is not None:
+                cond = _filter_condition_sql(m.filter, table)
+                select_parts.append(f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END) AS {alias_sql}")
+            else:
+                select_parts.append(f"COUNT(*) AS {alias_sql}")
         elif agg == "RATE":
             # conditional rate: filtered_count / total_count on same subject
-            if rate_filters:
-                f = rate_filters[0]
-                ft = f.table or table
-                lit = f.value
-                if isinstance(lit, str):
-                    lit_s = lit.replace("'", "''")
-                    cond = f"{_qident(ft)}.{_qident(f.field)} = '{lit_s}'"
-                else:
-                    cond = f"{_qident(ft)}.{_qident(f.field)} = {lit}"
+            rate_filter = m.filter
+            if rate_filter is None and rate_filters:
+                rate_filter = rate_filters[0]
+                consumed_global_filter_indexes.add(0)
+            if rate_filter is not None:
+                cond = _filter_condition_sql(rate_filter, table)
                 select_parts.append(
-                    f"(SUM(CASE WHEN {cond} THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*),0)) AS value"
+                    f"(SUM(CASE WHEN {cond} THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*),0)) AS {alias_sql}"
                 )
             else:
-                select_parts.append("COUNT(*) AS value")
+                select_parts.append(f"COUNT(*) AS {alias_sql}")
         else:
             select_parts.append(
-                f"{agg}({_qident(table)}.{_qident(m.source_field)}) AS value"
+                f"{agg}({_qident(table)}.{_qident(m.source_field)}) AS {alias_sql}"
             )
-    # rate already encodes filter as CASE — avoid double-filtering in WHERE
-    if any((m.aggregation or "").lower() == "rate" for m in spec.measures):
-        spec_filters_for_where = []
-    else:
-        spec_filters_for_where = list(spec.filters or [])
+    # Only predicates consumed by a rate CASE are removed from WHERE. Other
+    # global slices (time/region/etc.) must still constrain the denominator.
+    spec_filters_for_where = [
+        f for i, f in enumerate(spec.filters or []) if i not in consumed_global_filter_indexes
+    ]
     # dimensions
     group_cols = []
     for d in spec.dimensions or []:

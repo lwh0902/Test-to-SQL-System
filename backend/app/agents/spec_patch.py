@@ -65,6 +65,29 @@ def looks_like_followup(question: str) -> bool:
     return False
 
 
+def _explicit_new_subject(question: str, catalog: SemanticCatalog, state: Optional[ActiveAnalysisState]) -> bool:
+    """True when user names a catalog table different from the active subject — force rebuild."""
+    if not state or not catalog:
+        return False
+    q = (question or "").lower()
+    active = {
+        (state.active_subject or "").lower(),
+        *{str(t).lower() for t in (state.required_tables or [])},
+    }
+    active.discard("")
+    mentioned = []
+    for t in catalog.tables:
+        name = (t.name or "").lower()
+        if not name:
+            continue
+        if re.search(rf"(?<![a-z0-9_]){re.escape(name)}(?![a-z0-9_])", q):
+            mentioned.append(name)
+    if not mentioned:
+        return False
+    # any mentioned table outside active subject/tables → new analysis
+    return any(m not in active for m in mentioned)
+
+
 def _month_end_str(y: int, mo: int) -> str:
     from datetime import date, timedelta
 
@@ -93,6 +116,21 @@ def _apply_dimension_patch(spec: AnalysisSpec, catalog: SemanticCatalog, questio
             ):
                 dims.append(c.name)
                 break
+    # top-n / single-axis category follow-up: keep one best dimension only
+    if dims and re.search(r"前\s*\d+|top\s*\d+|前几|排名|商品分类|品类", q, re.I):
+        prefer = []
+        for name in dims:
+            score = 0
+            if re.search(r"category|品类|分类|group", name, re.I):
+                score += 5
+            if re.search(r"status|age_group|pay_channel|source_channel", name, re.I):
+                score -= 3
+            prefer.append((score, name))
+        prefer.sort(key=lambda x: -x[0])
+        dims = [prefer[0][1]] if prefer else dims[:1]
+        # replace rather than stack onto prior dims for rank questions
+        if dims and dims[0] not in (spec.dimensions or []):
+            spec.dimensions = []
     for field_name in dims:
         owner = None
         for t in catalog.tables:
@@ -138,30 +176,60 @@ def _apply_topn_patch(spec: AnalysisSpec, catalog: SemanticCatalog, question: st
 def _apply_multi_measure_patch(spec: AnalysisSpec, catalog: SemanticCatalog, question: str) -> list[str]:
     ops: list[str] = []
     q = question or ""
-    if not re.search(r"总数和失败|失败数|都给我|同时.*(总数|失败)|总数.*失败", q):
+    from app.agents.analysis_pipeline import (
+        _asks_failure_count,
+        _asks_total_count,
+        _failure_filter_from_question,
+        _needs_rate,
+    )
+
+    asks_failure_count = _asks_failure_count(q)
+    asks_total_count = _asks_total_count(q)
+    asks_rate = _needs_rate(q)
+    if not (asks_failure_count and (asks_total_count or asks_rate)):
         return ops
     table = spec.subject or (spec.required_tables[0] if spec.required_tables else "")
     if table not in catalog.table_map:
         return ops
     id_col = catalog.table_map[table].primary_key[0] if catalog.table_map[table].primary_key else "*"
-    # keep total count + failed count markers
-    spec.measures = [
-        Measure(source_field=id_col, aggregation="count", table=table, business_label="total_count"),
-        Measure(source_field=id_col, aggregation="count", table=table, business_label="failed_count"),
+    failure_filter = _failure_filter_from_question(catalog, table, q)
+    if failure_filter is None:
+        return ops
+    spec.filters = [
+        f
+        for f in spec.filters
+        if not (f.table == failure_filter.table and f.field == failure_filter.field)
     ]
-    ops.append("multi_measure:total_and_failed")
-    # ensure failed filter exists for second measure semantics
-    from app.agents.analysis_pipeline import _failed_status_value, _status_columns
-
-    if not any(str(getattr(f, "value", "")).lower() in {"failed", "overdue", "alarm", "bad", "out"} or "失败" in str(getattr(f, "value", "")) for f in spec.filters):
-        for tname, col in _status_columns(catalog, table):
-            val = _failed_status_value(col, q) or _failed_status_value(col, "失败 failed")
-            if val is not None:
-                spec.filters = [f for f in spec.filters if f.field != col.name] + [
-                    FilterExpr(field=col.name, op="=", value=val, table=tname)
-                ]
-                ops.append(f"set_filter:{col.name}={val}")
-                break
+    if asks_rate and not asks_total_count:
+        spec.measures = [
+            Measure(
+                source_field=id_col,
+                aggregation="count",
+                table=table,
+                business_label="failed_count",
+                filter=failure_filter,
+            ),
+            Measure(
+                source_field=id_col,
+                aggregation="rate",
+                table=table,
+                business_label="failed_rate",
+                filter=failure_filter,
+            ),
+        ]
+        ops.append("multi_measure:failed_count_and_rate")
+    else:
+        spec.measures = [
+            Measure(source_field=id_col, aggregation="count", table=table, business_label="total_count"),
+            Measure(
+                source_field=id_col,
+                aggregation="count",
+                table=table,
+                business_label="failed_count",
+                filter=failure_filter,
+            ),
+        ]
+        ops.append("multi_measure:total_and_failed")
     return ops
 
 
@@ -213,7 +281,16 @@ def _apply_filter_patch(spec: AnalysisSpec, catalog: SemanticCatalog, question: 
 
     # dedupe by field
     existing = {(f.field, str(f.value)) for f in spec.filters}
+    measure_local = {
+        (m.filter.table, m.filter.field, m.filter.op, str(m.filter.value))
+        for m in spec.measures
+        if m.filter is not None
+    }
     for f in filters:
+        if (f.table, f.field, f.op, str(f.value)) in measure_local:
+            # Already represented inside conditional aggregates; adding it to
+            # WHERE would corrupt the denominator/total.
+            continue
         key = (f.field, str(f.value))
         if key in existing:
             continue
@@ -371,6 +448,21 @@ def patch_or_build(
     q = (question or "").strip()
     has_state = bool(state and state.is_valid() and state.measures)
 
+    # Explicit new table name always rebuilds — do not stick to prior subject.
+    if has_state and _explicit_new_subject(q, catalog, state):
+        plan = plan_question(q, catalog)
+        if plan.action == "query" and plan.spec:
+            return PatchResult(action="build_spec", spec=plan.spec, is_followup=False)
+        if plan.action == "clarify":
+            return PatchResult(
+                action="clarify",
+                clarify_slots=list(plan.clarify_slots or []),
+                clarify_message=plan.clarify_message,
+                is_followup=False,
+            )
+        if plan.action == "refuse":
+            return PatchResult(action="refuse", clarify_message=plan.clarify_message)
+
     if has_state and looks_like_followup(q):
         spec = state.to_spec(original_question=q)
         ops: list[str] = []
@@ -395,7 +487,9 @@ def patch_or_build(
             ops.extend(_apply_time_patch(spec, catalog, q))
             ops.extend(_apply_clarify_fill(spec, catalog, q))
             # rate follow-up
-            if re.search(r"失败率|成功率|比率", q):
+            if re.search(r"失败率|成功率|比率", q) and not any(
+                o.startswith("multi_measure:") for o in ops
+            ):
                 table = spec.subject or (spec.required_tables[0] if spec.required_tables else "")
                 if table in catalog.table_map:
                     id_col = (

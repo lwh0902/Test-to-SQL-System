@@ -110,7 +110,7 @@ def save_message(session_id: str | None, role: str, content: str, meta: dict | N
         """), {
             "id": msg_id, "sid": session_id, "role": role,
             "content": content,
-            "meta": json.dumps(meta, ensure_ascii=False) if meta else None,
+            "meta": json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
         })
         conn.execute(text("UPDATE chat_sessions SET updated_at = NOW() WHERE id = :sid"), {"sid": session_id})
         conn.commit()
@@ -183,12 +183,22 @@ def persist_from_agent_state(state):
     save_message(session_id, "user", state.question)
 
     # 2. 构建 assistant 消息的 meta
+    # rows 有上限地写入 meta，保证刷新历史后图表/数据表/单值卡可恢复；
+    # trace 只存精简版（node/status/elapsed），完整 trace 走 /api/traces。
+    _META_ROWS_CAP = 200
+    rows = getattr(state, "rows", None) or []
+    raw_trace = getattr(state, "trace", None) or []
     meta = {
         "type": state.response_type,
         "trace_id": state.trace_id,
         "sql": state.sql,
         "columns": state.columns,
-        "rows_count": len(state.rows),
+        "rows_count": len(rows),
+        "rows": rows[:_META_ROWS_CAP],
+        "trace": [
+            {"node": s.get("node"), "status": s.get("status"), "elapsed_ms": s.get("elapsed_ms")}
+            for s in raw_trace
+        ],
     }
     if state.chart:
         meta["chart"] = state.chart

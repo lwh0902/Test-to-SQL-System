@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
@@ -382,6 +383,12 @@ async def _report_outline(ctx, state: dict) -> dict:
     question = inputs.get("question") or ""
     revision = inputs.get("revision_notes") or inputs.get("review_reasons") or []
     outline = [{"title": t, "bullets": []} for t in _SECTION_TITLES]
+    if inputs.get("force_deterministic"):
+        return {
+            "outline": outline,
+            "revision_notes": list(revision),
+            "counts": {"outline_sections": len(outline)},
+        }
     policy = role_model_policy("report")
     system = (
         "你是 Report Agent 的 OUTLINE 步骤。只输出六段大纲要点，不要写长文。\n"
@@ -427,6 +434,57 @@ async def _report_outline(ctx, state: dict) -> dict:
     return {"outline": outline, "revision_notes": list(revision), "counts": {"outline_sections": len(outline)}}
 
 
+def _deterministic_query_facts(query: dict) -> tuple[list[str], int]:
+    """Render bounded, literal facts from query previews without inference."""
+    queries = query.get("evidence_queries") if isinstance(query, dict) else None
+    if not isinstance(queries, list) or not queries:
+        queries = [query]
+    ranked_facts: list[tuple[int, str]] = []
+    total_rows = 0
+    for item in queries[:6]:
+        if not isinstance(item, dict):
+            continue
+        rows = [r for r in (item.get("rows") or [])[:20] if isinstance(r, dict)]
+        if not rows:
+            continue
+        total_rows += int(item.get("rows_count") or len(rows))
+        sql = str(item.get("sql") or "")
+        table_match = re.search(r"\bFROM\s+`?([\w\u4e00-\u9fff]+)`?", sql, re.I)
+        table = table_match.group(1) if table_match else "查询结果"
+        if len(rows) == 1:
+            pairs = [f"{k}={v}" for k, v in rows[0].items()]
+            ranked_facts.append((int(item.get("rows_count") or len(rows)), f"{table}: " + "，".join(pairs)))
+            continue
+        metric_key = "value" if "value" in rows[0] else next(
+            (k for k, v in rows[0].items() if isinstance(v, (int, float))), ""
+        )
+        dimension_keys = [k for k in rows[0] if k != metric_key]
+        if metric_key and dimension_keys:
+            ordered = sorted(
+                rows,
+                key=lambda row: float(row.get(metric_key) or 0)
+                if isinstance(row.get(metric_key), (int, float))
+                else 0,
+                reverse=True,
+            )
+            rendered = []
+            for row in ordered[:8]:
+                dim = "/".join(str(row.get(k)) for k in dimension_keys)
+                rendered.append(f"{dim}={row.get(metric_key)}")
+            ranked_facts.append(
+                (
+                    int(item.get("rows_count") or len(rows)),
+                    f"{table} 按 {'/'.join(dimension_keys)} 分布: " + "，".join(rendered),
+                )
+            )
+        else:
+            ranked_facts.append(
+                (int(item.get("rows_count") or len(rows)), f"{table}: 返回 {len(rows)} 条分组结果")
+            )
+    ranked_facts.sort(key=lambda item: -item[0])
+    return [fact for _rank, fact in ranked_facts], total_rows
+
+
 async def _report_draft(ctx, state: dict) -> dict:
     inputs = getattr(ctx, "allowed_inputs", {}) or {}
     q = inputs.get("query") or {}
@@ -435,24 +493,27 @@ async def _report_draft(ctx, state: dict) -> dict:
     question = inputs.get("question") or ""
     outline = state.get("outline") or []
     revision = state.get("revision_notes") or []
+    force_deterministic = bool(inputs.get("force_deterministic"))
 
-    # fallback sections
-    findings = i.get("findings") or []
+    # Safe fallback is generated from literal query previews only. Insight
+    # hypotheses are intentionally not promoted into key findings.
+    evidence_facts, evidence_rows = _deterministic_query_facts(q)
+    generation_mode = "deterministic_evidence_fallback"
     sections = [
         {"title": "问题定义", "content": question, "evidence_ids": e},
         {
             "title": "数据范围与口径",
-            "content": f"本次使用 {q.get('rows_count', 0)} 条查询结果。",
+            "content": f"本次基于 {len(evidence_facts)} 组成功查询证据、{evidence_rows} 条结果预览。",
             "evidence_ids": e,
         },
         {
             "title": "关键发现",
-            "content": "\n".join(x.get("text", "") for x in findings) or "暂无发现。",
+            "content": "\n".join(evidence_facts) or "暂无可验证的数据事实。",
             "evidence_ids": e,
         },
-        {"title": "归因链路", "content": "因果关系需进一步对照验证。", "evidence_ids": e},
-        {"title": "业务影响与建议", "content": "基于证据补充维度后再决策。", "evidence_ids": e},
-        {"title": "待验证假设与风险", "content": "结论受当前查询范围限制。", "evidence_ids": e},
+        {"title": "归因链路", "content": "现有查询只支持相关性描述，不能据此确认因果关系。", "evidence_ids": e},
+        {"title": "业务影响与建议", "content": "优先处理查询中数量最高的异常分组，并补充可关联键后再验证根因。", "evidence_ids": e},
+        {"title": "待验证假设与风险", "content": "Insight 中的假设不作为事实结论；结论受当前查询范围限制。", "evidence_ids": e},
     ]
 
     policy = role_model_policy("report")
@@ -474,36 +535,42 @@ async def _report_draft(ctx, state: dict) -> dict:
         ensure_ascii=False,
         default=str,
     )
-    try:
-        result = await _model(ctx).acomplete(
-            ModelRequest(
-                system=system,
-                user=user,
-                tier=policy.tier,
-                thinking=policy.thinking,
-                max_tokens=policy.max_tokens,
-                expect_json=True,
-                temperature=0.3,
-            )
-        )
-        if result.ok and isinstance(result.json_payload, dict):
-            raw = result.json_payload.get("sections") or []
-            by_t = {str(s.get("title")): s for s in raw if isinstance(s, dict)}
-            fixed = []
-            for t in _SECTION_TITLES:
-                src = by_t.get(t) or next((s for s in sections if s["title"] == t), {"title": t, "content": "", "evidence_ids": e})
-                fixed.append(
-                    {
-                        "title": t,
-                        "content": str(src.get("content") or ""),
-                        "evidence_ids": src.get("evidence_ids") or e,
-                    }
+    if not force_deterministic:
+        try:
+            result = await _model(ctx).acomplete(
+                ModelRequest(
+                    system=system,
+                    user=user,
+                    tier=policy.tier,
+                    thinking=policy.thinking,
+                    max_tokens=policy.max_tokens,
+                    expect_json=True,
+                    temperature=0.3,
                 )
-            sections = fixed
-    except Exception:
-        logger.exception("report draft failed")
+            )
+            if result.ok and isinstance(result.json_payload, dict):
+                raw = result.json_payload.get("sections") or []
+                by_t = {str(s.get("title")): s for s in raw if isinstance(s, dict)}
+                fixed = []
+                for t in _SECTION_TITLES:
+                    src = by_t.get(t) or next((s for s in sections if s["title"] == t), {"title": t, "content": "", "evidence_ids": e})
+                    fixed.append(
+                        {
+                            "title": t,
+                            "content": str(src.get("content") or ""),
+                            "evidence_ids": src.get("evidence_ids") or e,
+                        }
+                    )
+                sections = fixed
+                generation_mode = "llm"
+        except Exception:
+            logger.exception("report draft failed")
 
-    return {"sections": sections, "counts": {**(state.get("counts") or {}), "sections": len(sections)}}
+    return {
+        "sections": sections,
+        "generation_mode": generation_mode,
+        "counts": {**(state.get("counts") or {}), "sections": len(sections)},
+    }
 
 
 async def _report_cite_check(ctx, state: dict) -> dict:
@@ -599,7 +666,10 @@ async def _report_revise(ctx, state: dict) -> dict:
 
 async def _report_commit(ctx, state: dict) -> dict:
     sections = state.get("sections") or []
-    p = {"sections": sections}
+    p = {
+        "sections": sections,
+        "generation_mode": state.get("generation_mode") or "unknown",
+    }
     aid = ctx.artifacts.save(artifact_type="ReportDocument", status="draft", payload=p)
     outline = [s.get("title") for s in sections if isinstance(s, dict)]
     ctx.memory.update_working(

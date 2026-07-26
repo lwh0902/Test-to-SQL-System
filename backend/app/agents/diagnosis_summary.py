@@ -28,6 +28,10 @@ class DiagnosisSummary:
 
     def answer_about(self, question: str) -> str:
         q = (question or "").strip()
+        if re.search(r"(?:三|3)\s*(?:句|句话)", q, re.I):
+            findings = [str(item).strip().rstrip("。！？!?") for item in self.key_findings[:3] if str(item).strip()]
+            if findings:
+                return "".join(f"{item}。" for item in findings)
         if re.search(r"一句话|结论|总结|summary|one.?line", q, re.I):
             return self.one_liner or "暂无已批准结论。"
         if re.search(r"下一步|接下来|还查|next", q, re.I):

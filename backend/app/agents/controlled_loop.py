@@ -269,8 +269,19 @@ def run_turn(
     elif outcome.is_success_with_data:
         terminal = "answer"
         action_trace.append("stop_success")
-        val = list(outcome.rows_preview[0].values())[-1]
-        answer = f"查询结果为 {val}。" + evidence.answer_footer()
+        first_row = outcome.rows_preview[0]
+        if len(spec.measures) > 1:
+            values = []
+            for i, measure in enumerate(spec.measures):
+                label = measure.business_label or f"value_{i + 1}"
+                if label in first_row:
+                    values.append(f"{label}={first_row[label]}")
+            if not values:
+                values = [f"{k}={v}" for k, v in first_row.items()]
+            answer = "查询结果：" + "，".join(values) + "。" + evidence.answer_footer()
+        else:
+            val = list(first_row.values())[-1]
+            answer = f"查询结果为 {val}。" + evidence.answer_footer()
     elif outcome.status == QueryOutcomeStatus.SUCCESS_EMPTY:
         terminal = "stop_empty"
         action_trace.append("stop_empty")

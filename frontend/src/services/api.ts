@@ -194,6 +194,32 @@ export async function getDataMap(spaceId: string): Promise<DataMap | null> {
 
 // ======== Sessions ========
 
+export interface DiagnosisBundle {
+  task_id: string;
+  report?: {
+    id?: string;
+    type?: string;
+    payload?: { sections?: Array<{ title?: string; content?: string; evidence_ids?: string[] }> };
+  };
+  review?: {
+    id?: string;
+    type?: string;
+    payload?: { approved?: boolean; reasons?: string[] };
+  };
+  exports?: Array<{
+    id?: string;
+    type?: string;
+    payload?: {
+      exported?: boolean;
+      format?: string;
+      file_name?: string;
+      artifact_id?: string;
+      download_url?: string;
+    };
+  }>;
+  artifacts?: Array<Record<string, unknown>>;
+}
+
 export interface Session {
   id: string;
   user_id: number;
@@ -202,6 +228,8 @@ export interface Session {
   created_at: string;
   updated_at: string;
   messages?: Message[];
+  /** Latest deep-diagnosis package for UI restore after refresh */
+  diagnosis_bundle?: DiagnosisBundle | null;
 }
 
 export interface Message {
@@ -236,9 +264,19 @@ export async function getSession(sessionId: string): Promise<Session> {
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  await fetchWithAuth(`${API_BASE}/sessions/${sessionId}`, {
+  const res = await fetchWithAuth(`${API_BASE}/sessions/${sessionId}`, {
     method: 'DELETE',
   });
+  if (!res.ok) throw new Error(`delete failed: ${res.status}`);
+}
+
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+  const res = await fetchWithAuth(`${API_BASE}/sessions/${sessionId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) throw new Error(`rename failed: ${res.status}`);
 }
 
 // ======== Connections ========
@@ -323,6 +361,77 @@ export async function createUserSpace(name: string, connectionId: string): Promi
 export interface SSEEvent {
   event: string;
   data: Record<string, unknown>;
+}
+
+export interface DiagnosisStreamOptions {
+  seedQuery?: {
+    columns?: string[];
+    rows?: Record<string, unknown>[];
+    rows_count?: number;
+    sql?: string;
+  };
+  exportFormats?: string[];
+}
+
+export function streamDiagnosis(
+  question: string,
+  spaceId: string,
+  sessionId: string,
+  onEvent: (event: SSEEvent) => void,
+  onComplete: (data: Record<string, unknown>) => void,
+  onError: (error: Error) => void,
+  options?: DiagnosisStreamOptions,
+) {
+  const controller = new AbortController();
+  const body: Record<string, unknown> = {
+    question,
+    space_id: spaceId,
+    session_id: sessionId,
+  };
+  if (options?.seedQuery) body.seed_query = options.seedQuery;
+  if (options?.exportFormats?.length) body.export_formats = options.exportFormats;
+  fetch(`${API_BASE}/diagnosis/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  })
+    .then((res) => {
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      processDiagnosisStream(res, onEvent, onComplete, onError);
+    })
+    .catch(onError);
+  return { close: () => controller.abort() };
+}
+
+/** Authenticated download of an ExportFile artifact. */
+export async function downloadExport(
+  artifactId: string,
+  sessionId: string,
+  spaceId: string,
+  fileName?: string,
+): Promise<void> {
+  const qs = new URLSearchParams({ session_id: sessionId, space_id: spaceId });
+  const res = await fetch(`${API_BASE}/exports/${artifactId}/download?${qs}`, {
+    headers: { ...authHeaders() },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `下载失败 HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName || `${artifactId}.bin`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+function processDiagnosisStream(res: Response, onEvent: (event:SSEEvent)=>void, onComplete:(data:Record<string,unknown>)=>void, onError:(error:Error)=>void) {
+  const reader=res.body!.getReader(), decoder=new TextDecoder(); let buffer='', event='', data='';
+  (async()=>{ while(true) { const {done,value}=await reader.read(); if(done) break; buffer+=decoder.decode(value,{stream:true}); const lines=buffer.split('\n'); buffer=lines.pop()||''; for(const line of lines){ if(line.startsWith('event: ')) event=line.slice(7).trim(); else if(line.startsWith('data: ')) data=line.slice(6); else if(!line && event && data){ const parsed=JSON.parse(data); if(event==='complete') onComplete(parsed); else onEvent({event,data:parsed}); event=''; data=''; } } } })().catch(onError);
 }
 
 export function streamChat(

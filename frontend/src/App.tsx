@@ -8,25 +8,28 @@ import {
   ShoppingCartOutlined,
   BarChartOutlined,
   DeleteOutlined,
+  EditOutlined,
   LoginOutlined,
   LogoutOutlined,
   MenuOutlined,
   DatabaseOutlined,
 } from '@ant-design/icons';
-import { streamChat } from './services/api';
-import type { SSEEvent } from './services/api';
-import type { ChatResponse, MetricCandidate, TraceStep, PlanProgress } from './types';
 import {
+  downloadExport,
+  streamChat,
+  streamDiagnosis,
   listSpaces,
   listSessions,
   createSession,
   deleteSession,
+  renameSession,
   login,
   register,
   logout as apiLogout,
   getDataMap,
 } from './services/api';
-import type { DataMap, DataMapQuestion, Space as SpaceInfo, Session } from './services/api';
+import type { SSEEvent, DataMap, DataMapQuestion, Space as SpaceInfo, Session, DiagnosisBundle } from './services/api';
+import type { ChatResponse, MetricCandidate, TraceStep, PlanProgress } from './types';
 
 import ChatMessage from './components/ChatMessage';
 import DataMapBlock from './components/DataMapBlock';
@@ -35,16 +38,14 @@ import SpaceCreateModal from './components/SpaceCreateModal';
 import Ferrofluid from '@/components/ui/ferrofluid';
 import GooeyNav from '@/components/ui/gooey-nav';
 import LoginPage from './pages/LoginPage';
-import datapilotAppIcon from './assets/datapilot-app-icon.png';
+import AgentActivityPanel, { type AgentActivity } from './components/AgentActivityPanel';
+import DiagnosisReport, { type ExportLinkItem, type ReportSection } from './components/DiagnosisReport';
 
 const { Sider, Content } = Layout;
 const { Text } = Typography;
 
-const BRAND_INK_TEXT = '#FFFFFF';
 const BRAND_PANEL = 'rgba(8, 6, 16, 0.72)';
 const BRAND_CARD = 'rgba(255, 255, 255, 0.04)';
-const BRAND_DEEP = '#1A0F30';
-const BRAND_LIME = '#C079FF';
 const BRAND_BORDER = 'rgba(255, 255, 255, 0.08)';
 const BRAND_MUTED = '#9B97AD';
 const BRAND_TEXT = '#F4F4F8';
@@ -52,7 +53,7 @@ const BRAND_SOFT = 'rgba(255, 255, 255, 0.06)';
 const GLASS_BLUR = 'blur(16px)';
 
 const SPACE_META: Record<string, { icon: React.ReactNode; color: string }> = {
-  tech_quality: { icon: <BugOutlined />, color: BRAND_LIME },
+  tech_quality: { icon: <BugOutlined />, color: BRAND_MUTED },
   ecommerce: { icon: <ShoppingCartOutlined />, color: '#6E6A82' },
 };
 
@@ -106,6 +107,8 @@ function App() {
 
   // 移动端侧边栏
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<{ id: string; title: string } | null>(null);
+  const [showDataScope, setShowDataScope] = useState(false);
 
   // 停止生成
   const streamRef = useRef<{ close: () => void } | null>(null);
@@ -121,6 +124,62 @@ function App() {
 
   // Plan-and-Execute 进度
   const [planProgress, setPlanProgress] = useState<PlanProgress | null>(null);
+  const [agentActivities, setAgentActivities] = useState<AgentActivity[]>([]);
+  const [diagnosisReport, setDiagnosisReport] = useState<{
+    sections: ReportSection[];
+    approved: boolean;
+    reasons?: string[];
+    exports?: ExportLinkItem[];
+  } | null>(null);
+
+  const applyDiagnosisBundle = (bundle: DiagnosisBundle | null | undefined) => {
+    if (!bundle || typeof bundle !== 'object') {
+      setDiagnosisReport(null);
+      return;
+    }
+    const b = bundle as {
+      report?: { payload?: { sections?: ReportSection[] }; id?: string };
+      review?: { payload?: { approved?: boolean; reasons?: string[] } };
+      exports?: Array<{ id?: string; payload?: { exported?: boolean; format?: string; file_name?: string; artifact_id?: string } }>;
+    };
+    const sections = b.report?.payload?.sections;
+    const review = b.review?.payload;
+    const exportArts = (b.exports || [])
+      .map((item) => {
+        const p = item.payload || {};
+        if (!p.exported && item.id) {
+          // still allow download if artifact exists
+        }
+        const id = item.id || p.artifact_id || '';
+        if (!id) return null;
+        if (p.exported === false) return null;
+        return {
+          artifactId: id,
+          format: p.format || 'bin',
+          fileName: p.file_name,
+        } as ExportLinkItem;
+      })
+      .filter((x): x is ExportLinkItem => Boolean(x));
+    if (sections && sections.length) {
+      setDiagnosisReport({
+        sections,
+        approved: Boolean(review?.approved),
+        reasons: review?.reasons || [],
+        exports: review?.approved ? exportArts : [],
+      });
+    } else if (review && review.approved === false) {
+      setDiagnosisReport({
+        sections: [],
+        approved: false,
+        reasons: review.reasons || ['审核未通过'],
+        exports: [],
+      });
+    } else {
+      setDiagnosisReport(null);
+    }
+  };
+
+
 
   useEffect(() => {
     if (!token) return;
@@ -168,6 +227,7 @@ function App() {
             else if (m.meta) msgs.push({ role: 'assistant', content: m.content, data: m.meta as unknown as ChatResponse });
           }
           setMessages(msgs); setSseSteps([]);
+          applyDiagnosisBundle(sess.diagnosis_bundle);
         }).catch(() => {}).finally(() => setSessionLoading(false));
       }
     });
@@ -214,13 +274,14 @@ function App() {
       const sid = session.id;
       setActiveSessionId(sid);
       localStorage.setItem('dp_session', sid);
-      setMessages([]); setSseSteps([]);
+      setMessages([]); setSseSteps([]); setDiagnosisReport(null); setAgentActivities([]);
       loadSessions(activeSpaceId);
     } catch {
       message.error('创建会话失败');
     }
     setDrawerOpen(false);
   };
+
 
   const handleSelectSession = async (sessionId: string) => {
     setActiveSessionId(sessionId);
@@ -234,6 +295,7 @@ function App() {
         else if (m.meta) msgs.push({ role: 'assistant', content: m.content, data: m.meta as unknown as ChatResponse });
       }
       setMessages(msgs); setSseSteps([]);
+      applyDiagnosisBundle(sess.diagnosis_bundle);
     } catch {
       message.error('加载会话失败');
     }
@@ -264,10 +326,143 @@ function App() {
     });
   };
 
+  const handleRenameSubmit = async () => {
+    if (!renameTarget) return;
+    const title = renameTarget.title.trim();
+    if (!title) {
+      message.warning('标题不能为空');
+      return;
+    }
+    try {
+      await renameSession(renameTarget.id, title);
+      setRenameTarget(null);
+      loadSessions(activeSpaceId);
+    } catch {
+      message.error('重命名失败');
+    }
+  };
+
   const handleStopGeneration = () => {
     streamRef.current?.close();
     streamRef.current = null;
     setLoading(false);
+  };
+
+  const runDiagnosis = (
+    question: string,
+    options?: {
+      seedQuery?: {
+        columns?: string[];
+        rows?: Record<string, unknown>[];
+        rows_count?: number;
+        sql?: string;
+      };
+    },
+  ) => {
+    if (!question || !activeSessionId || loading) return;
+    setLoading(true);
+    setAgentActivities([]);
+    setDiagnosisReport(null);
+    streamRef.current = streamDiagnosis(
+      question,
+      activeSpaceId,
+      activeSessionId,
+      (evt) => {
+        if (
+          evt.event === 'agent_lifecycle' ||
+          evt.event === 'agent_progress' ||
+          evt.event === 'artifact_produced'
+        ) {
+          const data = evt.data as unknown as AgentActivity;
+          setAgentActivities((prev) => [...prev, data]);
+        }
+      },
+      (data) => {
+        const artifacts = (data.artifacts || []) as Array<{ type: string; payload: unknown; id?: string }>;
+        const report = artifacts.find((item) => item.type === 'ReportDocument')?.payload as
+          | { sections?: ReportSection[] }
+          | undefined;
+        const review = artifacts.find((item) => item.type === 'ReviewResult')?.payload as
+          | { approved?: boolean; reasons?: string[] }
+          | undefined;
+        const exportArts = artifacts
+          .filter((item) => item.type === 'ExportFile')
+          .map((item) => {
+            const p = (item.payload || {}) as {
+              exported?: boolean;
+              format?: string;
+              file_name?: string;
+              artifact_id?: string;
+            };
+            if (!p.exported) return null;
+            return {
+              artifactId: item.id || p.artifact_id || '',
+              format: p.format || 'bin',
+              fileName: p.file_name,
+            } as ExportLinkItem;
+          })
+          .filter((x): x is ExportLinkItem => Boolean(x && x.artifactId));
+        if (report?.sections) {
+          setDiagnosisReport({
+            sections: report.sections,
+            approved: Boolean(review?.approved),
+            reasons: review?.reasons || [],
+            exports: review?.approved ? exportArts : [],
+          });
+        } else if (review && review.approved === false) {
+          setDiagnosisReport({
+            sections: [],
+            approved: false,
+            reasons: review.reasons || ['审核未通过'],
+            exports: [],
+          });
+        }
+        setLoading(false);
+        streamRef.current = null;
+      },
+      () => {
+        message.error('深度诊断执行失败');
+        setLoading(false);
+      },
+      {
+        seedQuery: options?.seedQuery,
+        exportFormats: ['pdf', 'docx', 'csv'],
+      },
+    );
+  };
+
+  const handleDiagnosis = () => {
+    const q = inputValue.trim();
+    if (!q || !activeSessionId || loading) return;
+    setInputValue('');
+    runDiagnosis(q);
+  };
+
+  /** 基于已有查询结果触发深度诊断（跳过 Query，从 Insight 续跑） */
+  const handleGenerateDiagnosisFromResult = (question: string, data: ChatResponse) => {
+    if (!activeSessionId || loading) {
+      message.warning('请先登录并选择会话');
+      return;
+    }
+    const q = question?.trim() || '基于当前查询结果生成深度诊断报告';
+    const rows = (data.rows || []) as Record<string, unknown>[];
+    const columns = (data.columns || []) as string[];
+    runDiagnosis(q, {
+      seedQuery: {
+        columns,
+        rows: rows.slice(0, 100),
+        rows_count: rows.length,
+        sql: data.sql || '',
+      },
+    });
+  };
+
+  const handleExportDownload = async (item: ExportLinkItem) => {
+    if (!activeSessionId) {
+      message.warning('缺少会话');
+      return;
+    }
+    await downloadExport(item.artifactId, activeSessionId, activeSpaceId, item.fileName);
   };
 
   const handleOpenTrace = (data: ChatResponse) => {
@@ -283,6 +478,9 @@ function App() {
   const handleSend = async (question?: string, candidate?: MetricCandidate) => {
     const q = question || inputValue.trim();
     if (!q || loading) return;
+
+    // P3: 诊断意图由后端 Supervisor 判定；前端不再用关键词 hack 分流。
+    // 显式按钮「深度诊断」/「基于当前结果生成报告」仍走 runDiagnosis（button path）。
 
     // 如果没有 session，先自动创建一个
     let sessionId = activeSessionId;
@@ -363,6 +561,19 @@ function App() {
           return;
         }
 
+        // P3 deep diagnosis playbook events (via chat/stream handoff)
+        if (
+          event.event === 'agent_lifecycle' ||
+          event.event === 'agent_progress' ||
+          event.event === 'artifact_produced' ||
+          event.event === 'supervisor_decide' ||
+          event.event === 'task_created'
+        ) {
+          const data = event.data as unknown as AgentActivity;
+          setAgentActivities((prev) => [...prev, data]);
+          return;
+        }
+
         // answer_chunk is handled by streaming callback, don't add to steps
         if (event.event === 'answer_chunk' || event.event === 'summary_done') {
           return;
@@ -375,6 +586,59 @@ function App() {
         setSseSteps((prev) => [...prev, { node: label, status }]);
       },
       (res: ChatResponse) => {
+        // P3: deep diagnosis completed inside chat/stream
+        if ((res as { type?: string }).type === 'deep_diagnosis' || (res as { artifacts?: unknown[] }).artifacts) {
+          const artifacts = (res.artifacts || []).filter(
+            (item): item is { type: string; payload: unknown; id?: string } =>
+              typeof item.type === 'string' && 'payload' in item,
+          );
+          const report = artifacts.find((item) => item.type === 'ReportDocument')?.payload as
+            | { sections?: ReportSection[] }
+            | undefined;
+          const review = artifacts.find((item) => item.type === 'ReviewResult')?.payload as
+            | { approved?: boolean; reasons?: string[] }
+            | undefined;
+          const exportArts = artifacts
+            .filter((item) => item.type === 'ExportFile')
+            .map((item) => {
+              const p = (item.payload || {}) as {
+                exported?: boolean;
+                format?: string;
+                file_name?: string;
+                artifact_id?: string;
+              };
+              if (!p.exported) return null;
+              return {
+                artifactId: item.id || p.artifact_id || '',
+                format: p.format || 'bin',
+                fileName: p.file_name,
+              } as ExportLinkItem;
+            })
+            .filter((x): x is ExportLinkItem => Boolean(x && x.artifactId));
+          if (report?.sections) {
+            setDiagnosisReport({
+              sections: report.sections,
+              approved: Boolean(review?.approved),
+              reasons: review?.reasons || [],
+              exports: review?.approved ? exportArts : [],
+            });
+          } else if (review && review.approved === false) {
+            setDiagnosisReport({
+              sections: [],
+              approved: false,
+              reasons: review.reasons || ['审核未通过'],
+              exports: [],
+            });
+          }
+          setMessages((prev) => [...prev, {
+            role: 'assistant',
+            content: res.answer || res.message || '深度诊断已完成',
+            data: res,
+          }]);
+          setLoading(false); setSseSteps([]); setStreamingAnswer(''); setPlanProgress(null); loadSessions(activeSpaceId);
+          streamRef.current = null;
+          return;
+        }
         setMessages((prev) => [...prev, { role: 'assistant', content: res.answer || res.message || '', data: res }]);
         setLoading(false); setSseSteps([]); setStreamingAnswer(''); setPlanProgress(null); loadSessions(activeSpaceId);
         streamRef.current = null;
@@ -406,7 +670,17 @@ function App() {
     streamRef.current = stream;
   };
 
-  const handleCandidateClick = (c: MetricCandidate) => handleSend(`${c.name}趋势`, c);
+  const handleCandidateClick = (c: MetricCandidate) => {
+    // Full example questions / action chips: send as-is. Legacy metric chips keep 「趋势」后缀。
+    const name = (c.name || '').trim();
+    const isFullAsk =
+      c.key?.startsWith('hint_') ||
+      c.key?.startsWith('ex_') ||
+      /[？?]$/.test(name) ||
+      name.length >= 8 ||
+      /年|月|按|有什么|诊断|建档|配置/.test(name);
+    handleSend(isFullAsk ? name : `${name}趋势`, c);
+  };
   const handleQuestionClick = (q: DataMapQuestion) => {
     handleSend(q.text, q.metric ? {
       key: q.metric,
@@ -417,7 +691,7 @@ function App() {
     } : undefined);
   };
   const activeSpace = spaces.find((s) => s.id === activeSpaceId);
-  const spaceMeta = SPACE_META[activeSpaceId] || { icon: <BarChartOutlined />, color: '#C079FF' };
+  const spaceMeta = SPACE_META[activeSpaceId] || { icon: <BarChartOutlined />, color: BRAND_MUTED };
 
   // ---- 侧边栏内容（PC 和移动端共用） ----
   const sidebarContent = (
@@ -432,37 +706,41 @@ function App() {
         </div>
       </div>
 
-      {/* 新建会话按钮 */}
-      <div style={{ padding: '0 16px 8px', display: 'flex', gap: 8 }}>
-        <div
-          onClick={handleNewChat}
-          style={{
-            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            height: 40, borderRadius: 10, cursor: 'pointer',
-            background: BRAND_LIME, color: BRAND_INK_TEXT,
-            fontSize: 14, fontWeight: 600,
-            transition: 'all 0.2s',
-            boxShadow: '0 8px 22px rgba(255, 255, 255, 0.1)',
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = '#C079FF'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = BRAND_LIME; }}
-        >
-          <PlusOutlined style={{ fontSize: 14 }} />
-          新建分析
-        </div>
+      {/* 新建入口：新建分析 = 新建分析空间（连接数据库）；新建对话 = 新会话 */}
+      <div style={{ padding: '0 16px 8px', display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div
           onClick={() => setSpaceCreateOpen(true)}
           style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            width: 40, height: 40, borderRadius: 10, cursor: 'pointer',
-            background: BRAND_CARD, color: '#9B97AD',
-            fontSize: 16, transition: 'all 0.2s',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            height: 40, borderRadius: 10, cursor: 'pointer',
+            background: 'rgba(255, 255, 255, 0.08)', color: BRAND_TEXT,
+            fontSize: 14, fontWeight: 600,
+            transition: 'all 0.2s',
+            border: `1px solid ${BRAND_BORDER}`,
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)'; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = BRAND_CARD; }}
-          title="创建空间（连接你的数据库）"
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.12)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255, 255, 255, 0.08)'; }}
+          title="创建分析空间（连接你的数据库）"
         >
-          <DatabaseOutlined />
+          <DatabaseOutlined style={{ fontSize: 14 }} />
+          新建分析
+        </div>
+        <div
+          onClick={handleNewChat}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            height: 34, borderRadius: 10, cursor: 'pointer',
+            background: 'transparent', color: BRAND_MUTED,
+            fontSize: 13, fontWeight: 500,
+            transition: 'all 0.2s',
+            border: `1px dashed ${BRAND_BORDER}`,
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = BRAND_TEXT; e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = BRAND_MUTED; e.currentTarget.style.background = 'transparent'; }}
+          title="在当前空间新建对话"
+        >
+          <PlusOutlined style={{ fontSize: 12 }} />
+          新建对话
         </div>
       </div>
 
@@ -514,11 +792,12 @@ function App() {
         {sessions.map((s) => (
           <div
             key={s.id}
+            className="dp-session-item"
             onClick={() => handleSelectSession(s.id)}
             style={{
               padding: '10px 12px', borderRadius: 6, cursor: 'pointer', marginBottom: 2,
               background: activeSessionId === s.id ? BRAND_SOFT : 'transparent',
-              borderLeft: activeSessionId === s.id ? `3px solid ${BRAND_LIME}` : '3px solid transparent',
+              borderLeft: activeSessionId === s.id ? `3px solid ${BRAND_TEXT}` : '3px solid transparent',
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               transition: 'all 0.15s',
             }}
@@ -531,7 +810,7 @@ function App() {
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden', flex: 1, minWidth: 0 }}>
-              <MessageOutlined style={{ color: activeSessionId === s.id ? BRAND_LIME : '#6E6A82', fontSize: 13, flexShrink: 0 }} />
+              <MessageOutlined style={{ color: activeSessionId === s.id ? BRAND_TEXT : '#6E6A82', fontSize: 13, flexShrink: 0 }} />
               <div style={{ overflow: 'hidden' }}>
                 <div style={{
                   fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
@@ -541,8 +820,12 @@ function App() {
                 <div style={{ fontSize: 11, color: '#6E6A82' }}>{s.updated_at?.slice(5, 10)}</div>
               </div>
             </div>
-            <DeleteOutlined style={{ color: '#48455A', fontSize: 12, flexShrink: 0 }}
-              onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }} />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <EditOutlined className="dp-session-action" style={{ color: '#8A86A0', fontSize: 12 }}
+                onClick={(e) => { e.stopPropagation(); setRenameTarget({ id: s.id, title: s.title }); }} />
+              <DeleteOutlined className="dp-session-action" style={{ color: '#8A86A0', fontSize: 12 }}
+                onClick={(e) => { e.stopPropagation(); handleDeleteSession(s.id); }} />
+            </div>
           </div>
         ))}
       </div>
@@ -553,10 +836,10 @@ function App() {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, overflow: 'hidden' }}>
               <div style={{
-                width: 32, height: 32, borderRadius: '50%', background: BRAND_LIME,
+                width: 32, height: 32, borderRadius: '50%', background: 'rgba(255,255,255,0.12)', border: `1px solid ${BRAND_BORDER}`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
               }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: BRAND_INK_TEXT }}>{user.display_name[0]}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: BRAND_TEXT }}>{user.display_name[0]}</span>
               </div>
               <div style={{ overflow: 'hidden' }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: BRAND_TEXT, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user.display_name}</div>
@@ -577,7 +860,7 @@ function App() {
               background: BRAND_CARD, color: BRAND_TEXT,
               fontSize: 13, fontWeight: 500, transition: 'all 0.2s',
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = BRAND_LIME; e.currentTarget.style.color = BRAND_INK_TEXT; }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.12)'; e.currentTarget.style.color = BRAND_TEXT; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = BRAND_CARD; e.currentTarget.style.color = BRAND_TEXT; }}
           >
             <LoginOutlined style={{ fontSize: 14 }} />
@@ -644,7 +927,7 @@ function App() {
         <div style={{
           height: 52, borderBottom: `1px solid ${BRAND_BORDER}`, display: 'flex',
           alignItems: 'center', padding: '0 16px', gap: 12,
-          background: 'rgba(7, 17, 19, 0.55)', backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
+          background: 'rgba(8, 6, 16, 0.6)', backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
         }}>
           <Button type="text" icon={<MenuOutlined />} onClick={() => setDrawerOpen(true)}
             className="mobile-menu-btn" style={{ display: 'none', color: BRAND_TEXT }} />
@@ -658,10 +941,10 @@ function App() {
           {user && (
             <div className="mobile-user-avatar" style={{ display: 'none' }}>
               <div style={{
-                width: 28, height: 28, borderRadius: '50%', background: BRAND_LIME,
+                width: 28, height: 28, borderRadius: '50%', background: 'rgba(255,255,255,0.12)', border: `1px solid ${BRAND_BORDER}`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: BRAND_INK_TEXT }}>{user.display_name[0]}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: BRAND_TEXT }}>{user.display_name[0]}</span>
               </div>
             </div>
           )}
@@ -699,46 +982,53 @@ function App() {
                 )}
 
                 {!dataMapLoading && dataMap && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{
-                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 12,
-                      padding: 14,
-                      backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
-                    }}>
-                      <div style={{ marginBottom: 10 }}>
-                        <div style={{ color: BRAND_TEXT, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>先从这些问题开始</div>
-                        <div style={{ color: BRAND_MUTED, fontSize: 12 }}>
-                          不需要知道表名或字段名，点一个问题就能开始分析。
-                        </div>
-                      </div>
-                      <DataMapBlock dataMap={{ ...dataMap, tables: [] }} compact onQuestionClick={handleQuestionClick} />
-                    </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                    {/* 一键带入话题，直接裸排，不套大卡片 */}
+                    <DataMapBlock dataMap={{ ...dataMap, tables: [] }} compact onQuestionClick={handleQuestionClick} />
 
-                    <div style={{
-                      background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 12,
-                      padding: 14,
-                      backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
-                    }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
-                        <div>
-                          <div style={{ color: BRAND_TEXT, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>已识别的业务数据</div>
-                          <div style={{ color: BRAND_MUTED, fontSize: 12 }}>
-                            共 {dataMap.summary.table_count} 类数据、{dataMap.summary.metric_count} 个指标
+                    {/* 数据范围默认折叠，避免占满首屏 */}
+                    <button
+                      type="button"
+                      onClick={() => setShowDataScope((v) => !v)}
+                      style={{
+                        alignSelf: 'flex-start', background: 'transparent', border: 'none',
+                        color: BRAND_MUTED, fontSize: 12, cursor: 'pointer', padding: '2px 0',
+                        display: 'flex', alignItems: 'center', gap: 6,
+                      }}
+                    >
+                      <span style={{ fontSize: 10 }}>{showDataScope ? '▾' : '▸'}</span>
+                      {showDataScope
+                        ? '收起数据范围'
+                        : `查看数据范围 · ${dataMap.summary.table_count} 类数据 / ${dataMap.summary.metric_count} 个指标`}
+                    </button>
+
+                    {showDataScope && (
+                      <div style={{
+                        background: BRAND_PANEL, border: `1px solid ${BRAND_BORDER}`, borderRadius: 12,
+                        padding: 14,
+                        backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+                          <div>
+                            <div style={{ color: BRAND_TEXT, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>已识别的业务数据</div>
+                            <div style={{ color: BRAND_MUTED, fontSize: 12 }}>
+                              共 {dataMap.summary.table_count} 类数据、{dataMap.summary.metric_count} 个指标
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => handleSend('现在数据库有什么表')}
+                            style={{
+                              border: `1px solid rgba(255, 255, 255, 0.1)`, background: 'transparent', color: '#DCD8E8',
+                              borderRadius: 14, padding: '5px 11px', cursor: 'pointer', fontSize: 11, flexShrink: 0,
+                            }}
+                          >
+                            让 AI 说明
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => handleSend('现在数据库有什么表')}
-                          style={{
-                            border: `1px solid rgba(255, 255, 255, 0.1)`, background: 'transparent', color: '#DCD8E8',
-                            borderRadius: 14, padding: '5px 11px', cursor: 'pointer', fontSize: 11, flexShrink: 0,
-                          }}
-                        >
-                          让 AI 说明
-                        </button>
+                        <DataMapBlock dataMap={{ ...dataMap, recommended_questions: [] }} compact onQuestionClick={handleQuestionClick} />
                       </div>
-                      <DataMapBlock dataMap={{ ...dataMap, recommended_questions: [] }} compact onQuestionClick={handleQuestionClick} />
-                    </div>
+                    )}
                   </div>
                 )}
 
@@ -759,7 +1049,8 @@ function App() {
               <ChatMessage key={i} role={msg.role} content={msg.content} data={msg.data}
                 onCandidateClick={handleCandidateClick}
                 onDataMapQuestionClick={handleQuestionClick}
-                onOpenTrace={handleOpenTrace} />
+                onOpenTrace={handleOpenTrace}
+                onGenerateDiagnosis={handleGenerateDiagnosisFromResult} />
             ))}
 
             {/* ===== Assistant Pending Bubble — 所有进度统一在这里 ===== */}
@@ -767,16 +1058,20 @@ function App() {
               <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
                 <div style={{
                   width: 34, height: 34, borderRadius: 10, flexShrink: 0,
-                  background: BRAND_DEEP,
+                  background: 'rgba(255,255,255,0.06)',
+                  border: `1px solid ${BRAND_BORDER}`,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: BRAND_MUTED, fontSize: 12, fontWeight: 700,
                 }}>
-                  <img
-                    src={datapilotAppIcon}
-                    alt=""
-                    style={{ width: 34, height: 34, borderRadius: 10, display: 'block' }}
-                  />
+                  DP
                 </div>
-                <div style={{ flex: 1, fontSize: 14, lineHeight: '22px', color: BRAND_TEXT }}>
+                <div style={{
+                  flex: 1, fontSize: 14, lineHeight: '22px', color: BRAND_TEXT,
+                  background: 'rgba(10, 8, 16, 0.55)', border: `1px solid ${BRAND_BORDER}`,
+                  borderRadius: 14, padding: '14px 16px',
+                  backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
+                }}>
+                  <AgentActivityPanel activities={agentActivities} />
 
                   {/* 普通查询进度 / 多意图进度步骤 */}
                   {sseSteps.length > 0 && (
@@ -793,7 +1088,7 @@ function App() {
                             padding: '3px 0', fontSize: 13, display: 'flex', alignItems: 'center', gap: 6,
                             color: step.status === 'done' ? '#52c41a'
                               : step.status === 'denied' ? '#ff4d4f'
-                              : BRAND_LIME,
+                              : BRAND_MUTED,
                           }}>
                             {step.status === 'done' && <span>✓</span>}
                             {step.status === 'running' && <Spin size="small" />}
@@ -814,7 +1109,7 @@ function App() {
                   {planProgress && (
                     <div style={{ marginBottom: 12 }}>
                       {planProgress.phase === 'planning' && (
-                        <div style={{ color: BRAND_LIME, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ color: BRAND_MUTED, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                           <Spin size="small" /> 正在制定分析计划...
                         </div>
                       )}
@@ -827,7 +1122,7 @@ function App() {
                       {planProgress.phase !== 'planning' && planProgress.steps.map((step, idx) => (
                         <div key={step.id} style={{ padding: '3px 0', fontSize: 13, color: '#B5B1C6', display: 'flex', alignItems: 'center', gap: 6 }}>
                           {step.status === 'done' && <span style={{ color: '#52c41a' }}>✓</span>}
-                          {step.status === 'running' && <span style={{ color: BRAND_LIME }}><Spin size="small" /></span>}
+                          {step.status === 'running' && <span style={{ color: BRAND_MUTED }}><Spin size="small" /></span>}
                           {step.status === 'pending' && <span style={{ color: '#6E6A82' }}>{idx + 1}.</span>}
                           {step.status === 'done' && <span>{idx + 1}.</span>}
                           {' '}{step.title}
@@ -840,7 +1135,7 @@ function App() {
                         </div>
                       ))}
                       {planProgress.phase === 'summarizing' && !streamingAnswer && (
-                        <div style={{ color: BRAND_LIME, marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ color: BRAND_MUTED, marginTop: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
                           <Spin size="small" /> 正在生成分析总结...
                         </div>
                       )}
@@ -853,7 +1148,7 @@ function App() {
                       {streamingAnswer}
                       <span style={{
                         display: 'inline-block', width: 2, height: 16,
-                        background: BRAND_LIME, marginLeft: 2,
+                        background: BRAND_MUTED, marginLeft: 2,
                         animation: 'blink 1s step-end infinite',
                       }} />
                     </div>
@@ -869,6 +1164,10 @@ function App() {
               </div>
             )}
 
+            {diagnosisReport && (
+              <DiagnosisReport {...diagnosisReport} onDownload={handleExportDownload} />
+            )}
+
             <div ref={messagesEndRef} />
           </div>
         </Content>
@@ -878,8 +1177,8 @@ function App() {
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
             <div style={{
               display: 'flex', gap: 8, alignItems: 'flex-end',
-              background: BRAND_PANEL, borderRadius: 24, padding: '6px 6px 6px 20px',
-              border: '1px solid rgba(255, 255, 255, 0.1)', transition: 'border-color 0.2s',
+              background: 'rgba(8, 6, 16, 0.6)', borderRadius: 24, padding: '6px 6px 6px 20px',
+              border: '1px solid rgba(255, 255, 255, 0.14)', transition: 'border-color 0.2s',
               boxShadow: '0 18px 44px rgba(0,0,0,0.22)',
               backdropFilter: GLASS_BLUR, WebkitBackdropFilter: GLASS_BLUR,
             }}>
@@ -902,9 +1201,10 @@ function App() {
                   onClick={handleStopGeneration}
                   style={{ width: 40, height: 40, flexShrink: 0, background: '#ff4d4f', borderColor: '#ff4d4f', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
               ) : (
-                <Button type="primary" shape="circle" icon={<SendOutlined />}
+                <><Button onClick={handleDiagnosis} disabled={!inputValue.trim() || !activeSessionId}
+                  style={{ background: 'transparent', color: BRAND_MUTED, borderColor: BRAND_BORDER }}>深度诊断</Button><Button type="primary" shape="circle" icon={<SendOutlined />}
                   onClick={() => handleSend()} disabled={!inputValue.trim()}
-                  style={{ width: 40, height: 40, flexShrink: 0, background: BRAND_LIME, color: BRAND_INK_TEXT, borderColor: BRAND_LIME, boxShadow: '0 2px 12px rgba(192, 121, 255, 0.32)' }} />
+                  style={{ width: 40, height: 40, flexShrink: 0, background: 'rgba(255,255,255,0.92)', color: '#0B0B0F', borderColor: 'transparent' }} /></>
               )}
             </div>
             <div style={{ textAlign: 'center', marginTop: 8, fontSize: 11, color: '#6E6A82' }}>
@@ -919,6 +1219,24 @@ function App() {
         onClose={() => setSpaceCreateOpen(false)}
         onCreated={() => { listSpaces().then(setSpaces).catch(() => {}); }}
       />
+      <Modal
+        open={!!renameTarget}
+        title="重命名会话"
+        okText="保存"
+        cancelText="取消"
+        onCancel={() => setRenameTarget(null)}
+        onOk={handleRenameSubmit}
+        destroyOnHidden
+      >
+        <Input
+          value={renameTarget?.title ?? ''}
+          maxLength={60}
+          placeholder="输入会话名称"
+          onChange={(e) => setRenameTarget((prev) => (prev ? { ...prev, title: e.target.value } : prev))}
+          onPressEnter={handleRenameSubmit}
+          autoFocus
+        />
+      </Modal>
       <TraceDetailModal
         open={traceOpen}
         onClose={() => setTraceOpen(false)}

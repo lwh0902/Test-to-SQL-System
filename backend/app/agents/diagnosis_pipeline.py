@@ -23,6 +23,15 @@ from app.agents.query_outcome import QueryOutcome
 AgentCall = Callable[..., AsyncIterator[dict]]
 
 
+def _query_outcome_id(payload: dict | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    qo = payload.get("query_outcome")
+    if not isinstance(qo, dict):
+        return ""
+    return str(qo.get("outcome_id") or qo.get("id") or "")
+
+
 @dataclass
 class DiagnosisPipelineResult:
     admitted: bool
@@ -90,6 +99,10 @@ async def run_evidence_diagnosis(
         q_payload["query_outcome"] = {"status": admission.outcome_status, "rows_count": outcome.rows_count}
 
     artifact_ids = ["qr_1"]
+    seed_outcome_id = _query_outcome_id(q_payload)
+    if seed_outcome_id:
+        artifact_ids.append(seed_outcome_id)
+    evidence_queries = [dict(q_payload)]
     task = {
         "question": question,
         "task_id": task_id,
@@ -120,24 +133,88 @@ async def run_evidence_diagnosis(
         }
 
     gaps = list(i_payload.get("evidence_gaps") or [])
+    schema_payload = None
+    if space_id:
+        try:
+            from app.agents.catalog_repository import get_catalog_repository
+
+            catalog = get_catalog_repository().load(space_id)
+            schema_payload = catalog.to_public_dict() if catalog is not None else None
+        except Exception:
+            schema_payload = None
+    from app.agents.gap_compiler import compile_gap_task_spec, derive_required_evidence_gaps
+
+    required_gaps = derive_required_evidence_gaps(question, schema_payload=schema_payload)
+    if required_gaps:
+        gaps = [
+            gap
+            for gap in gaps
+            if not (
+                "缺少维度拆解（渠道/分类/设备等）" in str(gap)
+                or "缺少时间趋势对比" in str(gap)
+            )
+        ]
+    merged_gaps: list[str] = []
+    seen_gap_specs: set[tuple] = set()
+    for candidate in required_gaps + gaps:
+        compiled = compile_gap_task_spec(
+            [candidate],
+            base_question=question,
+            schema_payload=schema_payload,
+            prior_query=q_payload,
+            task_type="gap_fill_query",
+        )
+        signature = (
+            tuple(compiled.get("tables") or []),
+            tuple(compiled.get("dimensions") or []),
+            str(compiled.get("metric") or ""),
+            str(compiled.get("time_hint") or ""),
+        )
+        if signature in seen_gap_specs:
+            continue
+        seen_gap_specs.add(signature)
+        merged_gaps.append(candidate)
+    gaps = merged_gaps
     # GAP FILL at most once per gap
-    for g in gaps[:3]:
+    for gap_index, g in enumerate(gaps[:3], 1):
         if gap_tracker.try_fill(g):
             agents.append("query")
-            # optional gap query — synthetic no-op if agent returns empty
+            gap_task = compile_gap_task_spec(
+                [g],
+                base_question=question,
+                schema_payload=schema_payload,
+                prior_query=q_payload,
+                task_type="gap_fill_query",
+            )
+            # Query receives a rewritten question plus structured, observable
+            # hints. Re-sending the original question caused the live replay bug.
             gq = await _collect_agent(
                 agent_call,
                 task,
                 "query",
-                {"question": question, "task_type": "gap_fill", "evidence_gaps": [g]},
+                {
+                    "question": gap_task.get("question") or question,
+                    "task_type": "gap_fill_query",
+                    "task_spec": gap_task,
+                    "evidence_gaps": [g],
+                    "compiled_gap": True,
+                },
                 list(artifact_ids),
-                suffix=":gap",
+                suffix=f":gap:{gap_index}",
             )
             if gq.get("artifact_id"):
                 artifact_ids.append(str(gq["artifact_id"]))
             gp = gq.get("payload") or {}
+            outcome_id = _query_outcome_id(gp)
+            if outcome_id and outcome_id not in artifact_ids:
+                artifact_ids.append(outcome_id)
             if gp.get("rows") or gp.get("rows_count"):
-                q_payload = {**q_payload, **{k: gp[k] for k in ("rows", "rows_count", "columns", "sql") if k in gp}}
+                evidence_queries.append(dict(gp))
+                q_payload = {
+                    **q_payload,
+                    **{k: gp[k] for k in ("rows", "rows_count", "columns", "sql", "query_outcome") if k in gp},
+                    "evidence_queries": list(evidence_queries),
+                }
         # else duplicate counted inside tracker
 
     # wall check
@@ -167,6 +244,30 @@ async def run_evidence_diagnosis(
     if rep.get("artifact_id"):
         artifact_ids.append(str(rep["artifact_id"]))
 
+    if (
+        rep.get("error")
+        or rep.get("stop_reason") == "STOP_ERROR"
+        or r_payload.get("stop_reason") == "STOP_ERROR"
+        or not r_payload.get("sections")
+    ):
+        agents.append("report")
+        rep = await _collect_agent(
+            agent_call,
+            task,
+            "report",
+            {
+                "question": question,
+                "query": q_payload,
+                "insight": i_payload,
+                "force_deterministic": True,
+            },
+            list(artifact_ids),
+            suffix=":deterministic_fallback",
+        )
+        r_payload = rep.get("payload") or {}
+        if rep.get("artifact_id"):
+            artifact_ids.append(str(rep["artifact_id"]))
+
     sec_v = validate_report_sections(r_payload.get("sections") or [], allowed_ids=set(artifact_ids))
     unfounded = max(claim_v.unfounded_causal_count, sec_v.unfounded_causal_count)
     cite_rate = min(claim_v.key_claim_citation_rate, sec_v.key_claim_citation_rate)
@@ -186,6 +287,50 @@ async def run_evidence_diagnosis(
         list(artifact_ids),
     )
     review_payload = rev.get("payload") or {}
+
+    # A model outage must not approve an unverified LLM report. Retry once with
+    # a report assembled only from literal query evidence, then review that
+    # bounded artifact. This preserves fail-closed semantics without turning a
+    # transient Review outage into an unnecessary user-facing dead end.
+    if review_payload.get("review_mode") == "llm_unavailable_fail_closed":
+        agents.append("report")
+        rep = await _collect_agent(
+            agent_call,
+            task,
+            "report",
+            {
+                "question": question,
+                "query": q_payload,
+                "insight": i_payload,
+                "force_deterministic": True,
+            },
+            list(artifact_ids),
+            suffix=":deterministic_fallback",
+        )
+        r_payload = rep.get("payload") or {}
+        if rep.get("artifact_id"):
+            artifact_ids.append(str(rep["artifact_id"]))
+
+        sec_v = validate_report_sections(r_payload.get("sections") or [], allowed_ids=set(artifact_ids))
+        unfounded = max(claim_v.unfounded_causal_count, sec_v.unfounded_causal_count)
+        cite_rate = min(claim_v.key_claim_citation_rate, sec_v.key_claim_citation_rate)
+
+        agents.append("review")
+        rev = await _collect_agent(
+            agent_call,
+            task,
+            "review",
+            {
+                "question": question,
+                "query": q_payload,
+                "report": r_payload,
+                "insight": i_payload,
+            },
+            list(artifact_ids),
+            suffix=":deterministic_fallback",
+        )
+        review_payload = rev.get("payload") or {}
+
     # hard overlay: reject if evidence invalid
     if unfounded > 0 or cite_rate < 1.0:
         review_payload = {

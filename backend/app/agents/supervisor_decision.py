@@ -80,7 +80,7 @@ _L0_CHAT = frozenset({
 })
 _L0_HELP = frozenset({
     "怎么用", "帮助", "help", "你能做什么", "使用说明", "支持哪些", "有什么指标", "怎么查",
-    "功能介绍", "有什么功能", "你可以帮我干什么",
+    "功能介绍", "有什么功能", "你可以帮我干什么", "能帮我做什么",
     # NOTE: bare "?"/"？" is NOT L0 — may be schema follow-up after data_map
 })
 _L0_BUTTON_ACTIONS = {
@@ -88,6 +88,23 @@ _L0_BUTTON_ACTIONS = {
     "deep_diagnosis": "diagnosis",
     "open_help": "help",
 }
+
+
+def _looks_like_diagnosis_summary_cite(message: str) -> bool:
+    """High-precision retrospective report citation; never starts diagnosis."""
+    q = (message or "").strip()
+    q_l = q.lower()
+    exact = {
+        "结论", "摘要", "下一步呢", "然后呢", "一句话", "一句话结论",
+        "一句话结论是什么", "结论是什么", "结论摘要", "核心结论",
+        "下一步查什么", "总结一下结论", "报告的核心",
+    }
+    if q in exact or q_l in {x.lower() for x in exact}:
+        return True
+    retrospective = bool(re.search(r"刚才|上面|上一份|前面|此前|已有", q))
+    report_ref = bool(re.search(r"诊断|报告", q))
+    cite_action = bool(re.search(r"结论|摘要|概括|总结|下一步|建议", q))
+    return retrospective and report_ref and cite_action
 
 # L2 rule tables (fallback only — also used by legacy helpers)
 _L2_SCHEMA_KEYWORDS = (
@@ -331,13 +348,16 @@ def l0_fast_path(message: str, *, button_action: str | None = None) -> Superviso
     if q_l in _L0_HELP or q in _L0_HELP:
         return _decision_from_intent("help", message, confidence=1.0, fallback_used=False, layer="L0")
 
+    # A greeting plus a product-capability question is still a deterministic
+    # help request. Split only on punctuation and require every clause to be a
+    # known high-precision greeting/help phrase.
+    clauses = [part.strip().lower() for part in re.split(r"[，,。！？!?；;]+", q) if part.strip()]
+    if clauses and all(part in _L0_CHAT or part in _L0_HELP for part in clauses):
+        intent = "help" if any(part in _L0_HELP for part in clauses) else "chat"
+        return _decision_from_intent(intent, message, confidence=1.0, fallback_used=False, layer="L0")
+
     # High-precision summary cite short forms (zero FP vs data_query)
-    _L0_CITE_EXACT = frozenset({
-        "结论", "摘要", "下一步呢", "然后呢", "一句话", "一句话结论",
-        "一句话结论是什么", "结论是什么", "结论摘要", "核心结论",
-        "下一步查什么", "总结一下结论", "报告的核心",
-    })
-    if q in _L0_CITE_EXACT or q_l in {x.lower() for x in _L0_CITE_EXACT}:
+    if _looks_like_diagnosis_summary_cite(q):
         return _decision_from_intent(
             "summary_cite", message, confidence=1.0, fallback_used=False, layer="L0"
         )
@@ -399,6 +419,13 @@ def l2_rule_fallback(
         return _decision_from_intent("chat", message, fallback_used=True, layer="L2", error=error, confidence=0.9)
     if q_l in _L0_HELP or q in _L0_HELP:
         return _decision_from_intent("help", message, fallback_used=True, layer="L2", error=error, confidence=0.9)
+
+    # Citation must precede explicit "诊断报告" routing: the phrase may refer
+    # to an existing report rather than request a new heavy diagnosis.
+    if _looks_like_diagnosis_summary_cite(q):
+        return _decision_from_intent(
+            "summary_cite", message, fallback_used=True, layer="L2", error=error, confidence=0.9
+        )
 
     if any(k in q for k in _L2_SCHEMA_KEYWORDS):
         return _decision_from_intent(
@@ -468,6 +495,22 @@ def l2_rule_fallback(
             from app.services.data_map_service import get_table_aliases
             aliases = get_table_aliases(space_id) or []
             if any(a and str(a).lower() in q_l for a in aliases):
+                quantitative = any(
+                    p in q_l
+                    for p in (
+                        "多少", "数量", "总数", "合计", "总和", "平均", "占比",
+                        "率", "count", "sum", "avg", "rate", "top", "排名",
+                    )
+                )
+                if quantitative:
+                    return _decision_from_intent(
+                        "data_query",
+                        message,
+                        fallback_used=True,
+                        layer="L2",
+                        error=error,
+                        confidence=0.85,
+                    )
                 viewish = any(p in q for p in ("看", "查", "打开", "查看", "浏览", "列出", "显示", "展示"))
                 intent = "table_query" if viewish else "schema_understanding"
                 return _decision_from_intent(intent, message, fallback_used=True, layer="L2", error=error, confidence=0.7)

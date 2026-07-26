@@ -474,7 +474,8 @@ def _pick_measure_candidates(catalog: SemanticCatalog, question: str) -> list[tu
 
 
 def _status_columns(catalog: SemanticCatalog, table: str = "") -> list[tuple[str, Any]]:
-    out = []
+    """Rank outcome/status columns ahead of type/category columns for failure filters."""
+    scored: list[tuple[float, str, Any]] = []
     tables = [catalog.table_map[table]] if table and table in catalog.table_map else list(catalog.tables)
     for t in tables:
         if _is_decoy_table(t):
@@ -482,14 +483,34 @@ def _status_columns(catalog: SemanticCatalog, table: str = "") -> list[tuple[str
         for c in t.columns:
             top = list(getattr(getattr(c, "profile", None), "top_values", None) or [])
             tops = {str(v).lower() for v in top}
-            failish = tops & {"failed", "fail", "overdue", "alarm", "bad", "error", "out"}
-            if (
+            failish = tops & {"failed", "fail", "overdue", "alarm", "bad", "error", "out", "success"}
+            name_l = (c.name or "").lower()
+            is_typeish = bool(re.search(r"(_type|type_|scan_type|event_type|device_type|method)$", name_l))
+            is_outcome = bool(
+                re.search(r"(^|_)status($|_)|state|result|is_error|is_success|success_flag", name_l)
+            )
+            if not (
                 c.role == FieldRole.STATUS.value
-                or re.search(r"status|state|flag|direction|priority|方向", c.name, re.I)
+                or is_outcome
                 or failish
+                or re.search(r"flag|direction|priority|方向", c.name, re.I)
             ):
-                out.append((t.name, c))
-    return out
+                continue
+            score = 0.0
+            if is_outcome or name_l in {"status", "state", "result", "is_error", "is_success"}:
+                score += 10
+            if failish and ("failed" in tops or "success" in tops or "error" in tops):
+                score += 8
+            if c.role == FieldRole.STATUS.value:
+                score += 2
+            if is_typeish and not is_outcome:
+                # type columns are dimensions, not failure outcomes
+                score -= 12
+            if name_l.endswith("_code") and "status" in name_l:
+                score += 3  # status_code for HTTP errors
+            scored.append((score, t.name, c))
+    scored.sort(key=lambda x: -x[0])
+    return [(t, c) for s, t, c in scored if s > -5]
 
 
 def _failed_status_value(col: Any, question: str) -> str | None:
@@ -505,20 +526,100 @@ def _failed_status_value(col: Any, question: str) -> str | None:
         if re.search(rf"(?<![A-Za-z0-9_]){re.escape(str(v))}(?![A-Za-z0-9_])", q, re.I):
             return str(v)
     fail_tokens = ("failed", "fail", "overdue", "alarm", "bad", "error", "out", "closed_fail", "失败", "逾期", "告警", "异常")
-    if re.search(r"失败|逾期|告警|异常|failed|overdue|alarm|\bbad\b|\bout\b", q, re.I):
+    name_l = (getattr(col, "name", "") or "").lower()
+    is_typeish = bool(re.search(r"(_type|type_|scan_type|event_type|device_type|method)$", name_l))
+    if re.search(r"失败|逾期|告警|异常|错误|failed|overdue|alarm|error|\bbad\b|\bout\b", q, re.I):
         for v in top:
             vl = str(v).lower()
             if any(tok in vl for tok in fail_tokens):
                 return str(v)
-        # common literals even if not yet profiled
+        # Do not invent failure literals on type/category columns (e.g. scan_type).
+        if is_typeish and top:
+            return None
+        # common literals even if not yet profiled (outcome columns only)
         ql = q.lower()
         for lit in ("failed", "overdue", "alarm", "bad", "out", "error"):
             if re.search(rf"(?<![a-z0-9_]){lit}(?![a-z0-9_])", ql):
                 return lit
-        # Chinese
-        if "失败" in q:
+        # Chinese → prefer profiled failed; else literal on outcome-like columns
+        if re.search(r"失败|错误|异常", q) and not is_typeish:
             return "failed"
     return None
+
+
+def _failure_filter_from_question(
+    catalog: SemanticCatalog, table: str, question: str
+) -> FilterExpr | None:
+    """Resolve a failure/error predicate from catalog metadata and profiles."""
+    q = question or ""
+    if not re.search(r"失败|错误|异常|逾期|告警|failed|error|overdue|alarm", q, re.I):
+        return None
+    for tname, col in _status_columns(catalog, table):
+        name_l = (col.name or "").lower()
+        if name_l in {"is_error", "error_flag", "has_error"}:
+            return FilterExpr(field=col.name, op="=", value=1, table=tname)
+        if name_l in {"is_success", "success_flag"}:
+            return FilterExpr(field=col.name, op="=", value=0, table=tname)
+        if "status_code" in name_l or name_l in {"http_code", "response_code"}:
+            return FilterExpr(field=col.name, op=">=", value=400, table=tname)
+        value = _failed_status_value(col, q)
+        if value is not None:
+            return FilterExpr(field=col.name, op="=", value=value, table=tname)
+    return None
+
+
+_STATUS_INTENT_FAMILIES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("在售", "上架", "可售", "on sale"), ("on_sale", "onsale", "available", "active", "enabled", "published")),
+    (("售罄", "卖完", "sold out"), ("sold_out", "out_of_stock", "unavailable")),
+    (("下架", "停售", "off sale"), ("off_sale", "offsale", "inactive", "disabled", "unpublished")),
+    (("启用", "生效", "有效", "可用", "active"), ("active", "enabled", "valid", "available", "1", "true")),
+    (("停用", "失效", "无效", "禁用", "inactive"), ("inactive", "disabled", "invalid", "0", "false")),
+    (("成功", "正常", "success"), ("success", "succeeded", "ok", "normal")),
+)
+
+
+def _profiled_status_filter(
+    catalog: SemanticCatalog, table: str, question: str
+) -> FilterExpr | None:
+    """Map business state wording only to values observed in bounded profiles."""
+    q_l = (question or "").lower()
+    for tname, col in _status_columns(catalog, table):
+        top_values = list(getattr(getattr(col, "profile", None), "top_values", None) or [])
+        if not top_values:
+            continue
+        # A literal profiled enum value in the question always wins.
+        for raw in top_values:
+            value = str(raw)
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(value.lower())}(?![A-Za-z0-9_])", q_l):
+                return FilterExpr(field=col.name, op="=", value=raw, table=tname)
+        for question_tokens, value_tokens in _STATUS_INTENT_FAMILIES:
+            if not any(token.lower() in q_l for token in question_tokens):
+                continue
+            for raw in top_values:
+                normalized = re.sub(r"[\s-]+", "_", str(raw).lower())
+                if normalized in value_tokens:
+                    return FilterExpr(field=col.name, op="=", value=raw, table=tname)
+    return None
+
+
+def _asks_failure_count(question: str) -> bool:
+    q = question or ""
+    # "失败率是多少" requests only a rate. A separate count is present only
+    # when the failure entity itself is quantified.
+    return bool(
+        re.search(
+            r"(?:失败|错误|异常)(?!率)(?:数|数量|条数|个数)"
+            r"|(?:失败|错误|异常)(?!率)(?:的|请求|记录|扫描|任务|数)*[^？?。；;]{0,12}(?:有多少|大概多少|多少条|多少个|数量|个数|条数)"
+            r"|(?:有多少|多少条|多少个)[^？?。；;]{0,12}(?:失败|错误|异常)(?!率)"
+            r"|(?:failed|error)(?!\s*rate)[^?.;]{0,12}(?:count|how many)",
+            q,
+            re.I,
+        )
+    )
+
+
+def _asks_total_count(question: str) -> bool:
+    return bool(re.search(r"一共有多少|共有多少|总共有多少|总数|总量|全部.*多少|总共.*多少", question or ""))
 
 
 def _dim_from_question(catalog: SemanticCatalog, question: str) -> list[str]:
@@ -536,9 +637,23 @@ def _dim_from_question(catalog: SemanticCatalog, question: str) -> list[str]:
                 }:
                     dims.append(cname)
     # catalog dimensions — prefer subject table, avoid decoy/status noise for grouping
-    if re.search(r"按|分组|group\s+by|拆|分类|维度|排名", q, re.I):
+    if re.search(r"按|分组|group\s+by|拆|分类|维度|排名|前几|top\s*\d+", q, re.I):
         subject = _pick_subject_table(catalog, q)
-        subject_tables = [subject] if subject else [t.name for t in catalog.tables if not _is_decoy_table(t)]
+        # For "商品分类/品类" prefer fact tables that actually carry category snapshots
+        prefer_names: list[str] = []
+        if re.search(r"商品分类|品类|category", q, re.I):
+            for t in catalog.tables:
+                if _is_decoy_table(t):
+                    continue
+                if any(re.search(r"category|品类|分类", c.name, re.I) for c in t.columns):
+                    prefer_names.append(t.name)
+        subject_tables = []
+        if prefer_names:
+            subject_tables.extend(prefer_names)
+        if subject and subject not in subject_tables:
+            subject_tables.append(subject)
+        if not subject_tables:
+            subject_tables = [t.name for t in catalog.tables if not _is_decoy_table(t)]
         # explicit group field in question wins
         for tname in subject_tables:
             tp = catalog.table_map.get(tname)
@@ -548,8 +663,8 @@ def _dim_from_question(catalog: SemanticCatalog, question: str) -> list[str]:
                 if c.name in q:
                     if c.role in {FieldRole.ENUM_DIMENSION.value, FieldRole.STATUS.value, FieldRole.TEXT.value}:
                         dims.append(c.name)
-            # generic 分组/category
-            if re.search(r"分组|分类|category|group|priority|渠道|地区", q, re.I):
+            # generic 分组/category — pick ONE best column per subject table
+            if re.search(r"分组|分类|category|group|priority|渠道|地区|品类", q, re.I):
                 ranked = []
                 for c in tp.columns:
                     if c.is_primary_key or c.is_foreign_key:
@@ -558,17 +673,24 @@ def _dim_from_question(catalog: SemanticCatalog, question: str) -> list[str]:
                     score = 0
                     if c.role == FieldRole.ENUM_DIMENSION.value:
                         score += 3
-                    if re.search(r"group|category|priority|code|分组|品类|分类|渠道", c.name, re.I):
+                    if re.search(r"group|category|priority|code|分组|品类|分类", c.name, re.I):
+                        score += 5
+                    if re.search(r"渠道|channel|region|地区", c.name, re.I) and re.search(
+                        r"渠道|channel|地区|region", q, re.I
+                    ):
                         score += 4
-                    if c.role == FieldRole.STATUS.value:
-                        score += 1
+                    if c.role == FieldRole.STATUS.value and not re.search(r"状态|status", q, re.I):
+                        score -= 2
                     if 1 < len(top) <= 12:
                         score += 2
-                    if score:
+                    if score > 0:
                         ranked.append((score, c.name))
                 ranked.sort(key=lambda x: -x[0])
                 if ranked:
                     dims.append(ranked[0][1])
+                # category wording: stop after first good table hit
+                if ranked and re.search(r"商品分类|品类|category", q, re.I):
+                    break
     # unique preserve
     out = []
     for d in dims:
@@ -616,12 +738,14 @@ def _filter_from_question(catalog: SemanticCatalog, question: str) -> list[Filte
             val = m.group(1).strip().strip("`\"'")
             filters.append(FilterExpr(field=cname, op="=", value=val, table=tname))
 
-    # status / failed filters from profile vocabulary
-    for tname, col in _status_columns(catalog, subject or ""):
-        val = _failed_status_value(col, q)
-        if val is not None:
-            filters.append(FilterExpr(field=col.name, op="=", value=val, table=tname))
-            break
+    # Status predicates are grounded to actual columns/profiled enum values.
+    failure_filter = _failure_filter_from_question(catalog, subject or "", q)
+    if failure_filter is not None:
+        filters.append(failure_filter)
+    else:
+        status_filter = _profiled_status_filter(catalog, subject or "", q)
+        if status_filter is not None:
+            filters.append(status_filter)
 
     # legacy eval fixtures (keep backward compatibility)
     if re.search(r"paid|已支付|支付成功", q, re.I):
@@ -1051,21 +1175,52 @@ def plan_question(question: str, catalog: SemanticCatalog) -> PlanResult:
         if requires_time and tf:
             slots.append("time_range")
 
-    # multi-measure request
-    if re.search(r"总数和失败|失败数.*总数|总数.*失败|都给我|同时.*失败", q_norm):
-        if table in catalog.table_map:
-            id_col = catalog.table_map[table].primary_key[0] if catalog.table_map[table].primary_key else "*"
-            measures = [
-                Measure(source_field=id_col, aggregation="count", table=table, business_label="total_count"),
-                Measure(source_field=id_col, aggregation="count", table=table, business_label="failed_count"),
+    # Compound metrics require measure-local predicates. A global failure filter
+    # would silently turn the total into the failed count.
+    asks_failure_count = _asks_failure_count(q_norm)
+    asks_total_count = _asks_total_count(q_norm)
+    if table in catalog.table_map and asks_failure_count and (asks_total_count or want_rate):
+        id_col = catalog.table_map[table].primary_key[0] if catalog.table_map[table].primary_key else "*"
+        failure_filter = _failure_filter_from_question(catalog, table, q_norm)
+        if failure_filter is not None:
+            filters = [
+                f
+                for f in filters
+                if not (
+                    f.table == failure_filter.table
+                    and f.field == failure_filter.field
+                    and f.op == failure_filter.op
+                    and f.value == failure_filter.value
+                )
             ]
-            # second measure represented via filter retained for failed count — keep filter
-            if not any(f.value for f in filters):
-                for tname, col in _status_columns(catalog, table):
-                    val = _failed_status_value(col, "失败 failed")
-                    if val is not None:
-                        filters.append(FilterExpr(field=col.name, op="=", value=val, table=tname))
-                        break
+            if want_rate and not asks_total_count:
+                measures = [
+                    Measure(
+                        source_field=id_col,
+                        aggregation="count",
+                        table=table,
+                        business_label="failed_count",
+                        filter=failure_filter,
+                    ),
+                    Measure(
+                        source_field=id_col,
+                        aggregation="rate",
+                        table=table,
+                        business_label="failed_rate",
+                        filter=failure_filter,
+                    ),
+                ]
+            else:
+                measures = [
+                    Measure(source_field=id_col, aggregation="count", table=table, business_label="total_count"),
+                    Measure(
+                        source_field=id_col,
+                        aggregation="count",
+                        table=table,
+                        business_label="failed_count",
+                        filter=failure_filter,
+                    ),
+                ]
 
     ordering = None
     limit = None

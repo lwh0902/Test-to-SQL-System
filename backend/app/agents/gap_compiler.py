@@ -26,6 +26,8 @@ _DIMENSION_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("user_segment", ("用户群", "新老客", "会员", "segment", "cohort")),
     ("refund", ("退款", "refund", "退货", "售后")),
     ("product", ("商品", "sku", "product", "spu", "货品")),
+    ("error_type", ("失败类型", "错误类型", "异常类型", "error_type", "error type", "失败原因")),
+    ("status_code", ("状态码", "http状态", "status_code", "status code", "http code")),
 )
 
 # Business concept token → preferred physical table name hints (matched against schema)
@@ -37,6 +39,7 @@ _TABLE_CONCEPTS: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
     ("products", ("商品", "product", "sku", "货品", "类目"), ("product", "products", "ecom_product", "sku", "item")),
     ("traffic", ("流量", "traffic", "访问", "pv", "uv", "点击"), ("traffic", "event", "pageview", "visit", "ecom_traffic")),
     ("scans", ("扫描", "scan", "质检", "成功率"), ("scan", "scans", "scan_record", "quality")),
+    ("api_logs", ("api", "接口", "请求", "状态码"), ("api_log", "api_logs", "request_log", "access_log")),
 )
 
 _METRIC_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -144,6 +147,75 @@ def _match_tables(concepts: list[str], schema_names: list[str]) -> list[str]:
     return matched
 
 
+def _explicit_schema_tables(text: str, schema_names: list[str]) -> list[str]:
+    blob = (text or "").lower()
+    return [name for name in schema_names if name.lower() in blob]
+
+
+_DIMENSION_COLUMN_HINTS: dict[str, tuple[str, ...]] = {
+    "channel": ("channel", "source", "utm", "referrer"),
+    "category": ("category", "type", "class", "品类", "分类"),
+    "device": ("device", "terminal", "platform"),
+    "time": ("created_at", "event_time", "date", "time", "日期", "时间"),
+    "region": ("region", "city", "province", "area", "地区", "城市"),
+    "user_segment": ("segment", "cohort", "tier", "level", "用户群"),
+    "refund": ("refund_reason", "reason", "refund_status", "status", "退款原因"),
+    "product": ("category", "product_name", "sku", "product", "品类", "商品"),
+    "error_type": ("error_type", "failure_type", "error_code", "reason", "错误类型", "失败类型"),
+    "status_code": ("status_code", "http_code", "response_code", "状态码"),
+}
+
+
+def _resolve_dimension_columns(
+    dimensions: list[str], tables: list[str], schema_payload: dict | None
+) -> list[str]:
+    if not dimensions or not tables or not isinstance(schema_payload, dict):
+        return dimensions
+    table_set = {t.lower() for t in tables}
+    columns: list[dict] = []
+    for table in schema_payload.get("tables") or []:
+        if not isinstance(table, dict) or str(table.get("name") or "").lower() not in table_set:
+            continue
+        columns.extend(c for c in (table.get("columns") or []) if isinstance(c, dict))
+    if not columns:
+        return dimensions
+
+    resolved: list[str] = []
+    for dimension in dimensions:
+        exact = next(
+            (str(c.get("name")) for c in columns if str(c.get("name") or "").lower() == dimension.lower()),
+            None,
+        )
+        if exact:
+            resolved.append(exact)
+            continue
+        hints = _DIMENSION_COLUMN_HINTS.get(dimension, (dimension,))
+        ranked: list[tuple[int, str]] = []
+        for c in columns:
+            name = str(c.get("name") or "")
+            name_l = name.lower()
+            comment_l = str(c.get("comment") or "").lower()
+            role = str(c.get("role") or "")
+            score = 0
+            for rank, hint in enumerate(hints):
+                hint_l = hint.lower()
+                if name_l == hint_l:
+                    score = max(score, 20 - rank)
+                elif hint_l in name_l:
+                    score = max(score, 14 - rank)
+                elif hint_l in comment_l:
+                    score = max(score, 10 - rank)
+            if role in {"enum_dimension", "status"}:
+                score += 2
+            if c.get("is_primary_key") or c.get("is_foreign_key"):
+                score -= 8
+            if score > 0:
+                ranked.append((score, name))
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        resolved.append(ranked[0][1] if ranked else dimension)
+    return _uniq(resolved)
+
+
 def detect_dimensions(gaps: Iterable[str]) -> list[str]:
     dims: list[str] = []
     for g in gaps:
@@ -166,6 +238,63 @@ def detect_table_concepts(gaps: Iterable[str]) -> list[str]:
                 if key not in concepts:
                     concepts.append(key)
     return concepts
+
+
+def derive_required_evidence_gaps(
+    base_question: str,
+    *,
+    schema_payload: dict | None = None,
+) -> list[str]:
+    """Turn explicit diagnosis scopes into mandatory, executable evidence gaps.
+
+    Insight may suggest useful follow-up work, but it must not silently drop a
+    scope the user named. The output stays semantic and catalog-backed so the
+    same logic works with unseen MySQL schemas whose table names match the
+    observed business concepts.
+    """
+    question = str(base_question or "").strip()
+    if not question:
+        return []
+    q_l = question.lower()
+    schema_names = _schema_table_names(schema_payload)
+    concepts = detect_table_concepts([question])
+    dimensions = detect_dimensions([question])
+    gaps: list[str] = []
+
+    def matched(concept: str) -> str:
+        names = _match_tables([concept], schema_names)
+        return names[0] if names else concept
+
+    if "refunds" in concepts:
+        gaps.append(f"需要覆盖用户明确要求的退款分析：按退款原因拆解表 {matched('refunds')}。")
+
+    if "traffic" in concepts:
+        gaps.append(f"需要覆盖用户明确要求的流量分析：按流量渠道拆解表 {matched('traffic')}。")
+
+    if "orders" in concepts and re.search(r"结构|构成|分类|品类|structure|mix", question, re.I):
+        order_items = next(
+            (
+                name
+                for name in schema_names
+                if "order" in name.lower()
+                and any(token in name.lower() for token in ("item", "detail", "line"))
+            ),
+            matched("orders"),
+        )
+        gaps.append(f"需要覆盖用户明确要求的订单结构分析：按商品分类拆解表 {order_items}。")
+
+    failure_context = bool(re.search(r"失败|错误|异常|failed|error", question, re.I))
+    if "scans" in concepts and ("error_type" in dimensions or failure_context):
+        gaps.append(f"需要覆盖扫描失败类型：按失败类型拆解表 {matched('scans')}。")
+
+    if "api_logs" in concepts and (
+        "status_code" in dimensions
+        or (failure_context and "原因" in question)
+        or bool(re.search(r"api\s*(错误|失败|异常)|接口\s*(错误|失败|异常)", q_l, re.I))
+    ):
+        gaps.append(f"需要覆盖 API 错误证据：按状态码拆解表 {matched('api_logs')}。")
+
+    return _uniq(gaps)[:3]
 
 
 def detect_metric(gaps: Iterable[str], base_question: str = "") -> Optional[str]:
@@ -208,11 +337,6 @@ def build_gap_question(
 ) -> str:
     """Fully rewritten natural-language question for Query (no bare pronouns)."""
     parts: list[str] = []
-    base = (base_question or "").strip()
-    if base:
-        # strip prior gap suffixes to avoid infinite stacking
-        base = re.split(r"\n【补充查询", base, maxsplit=1)[0].strip()
-        parts.append(base)
 
     focus: list[str] = []
     if metric:
@@ -226,9 +350,20 @@ def build_gap_question(
     if time_hint:
         focus.append(f"时间口径 {time_hint}")
 
-    gap_txt = "；".join(gaps[:5]) if gaps else "证据不足"
+    target = tables[0] if tables else (table_concepts[0] if table_concepts else "相关数据表")
+    failure_context = any(
+        re.search(r"失败|错误|异常|failed|error", str(g), re.I) for g in gaps
+    ) or bool(re.search(r"失败|错误|异常|failed|error", base_question or "", re.I))
+    quantity_label = "失败记录数量" if failure_context else "记录数量"
+    if dimensions:
+        parts.append(f"统计 {target} 按 {'、'.join(dimensions)} 分组的{quantity_label}。")
+    elif metric:
+        parts.append(f"统计 {target} 的 {metric}。")
+    else:
+        parts.append(f"统计 {target} 的记录数量。")
+
     suffix = (
-        f"【补充查询·证据缺口】{gap_txt}。"
+        "【补充查询·证据缺口】已转换为独立的分组证据查询。"
         + ("请" + "，".join(focus) + "。" if focus else "请补充相关表/维度数据。")
         + "返回可对比的聚合结果，勿重复完全相同的总览查询。"
     )
@@ -246,10 +381,29 @@ def compile_gap_task(
 ) -> CompiledGapTask:
     """Compile evidence gaps into an executable Query task_spec."""
     clean_gaps = _uniq(str(g)[:200] for g in (gaps or []) if str(g).strip())[:8]
+    # The diagnosis question carries domain context that terse LLM gaps often
+    # omit (for example a gap says only "按失败类型拆解").
     dimensions = detect_dimensions(clean_gaps)
+    base_dimensions = detect_dimensions([base_question]) if base_question else []
+    base_specific = [d for d in base_dimensions if d in {"error_type", "status_code"}]
+    generic_breakdown = any(
+        re.search(r"维度拆解.*等|breakdown|渠道/分类/设备", gap, re.I) for gap in clean_gaps
+    )
+    if base_specific and generic_breakdown:
+        dimensions = base_specific
+    elif not dimensions:
+        dimensions = base_dimensions
     concepts = detect_table_concepts(clean_gaps)
+    if not concepts and base_question:
+        concepts = detect_table_concepts([base_question])
     metric = detect_metric(clean_gaps, base_question)
     time_hint = detect_time_hint(clean_gaps, base_question)
+
+    if dimensions and metric in {"refund_rate", "scan_success_rate", "conversion_rate"}:
+        # A "type/reason/status distribution" is a count breakdown. Compiling
+        # it as a rate inside each already-filtered group produces meaningless
+        # all-zero/all-one values and often requires an unavailable denominator.
+        metric = None
 
     # Infer from prior query columns if gaps are vague
     notes: list[str] = []
@@ -272,7 +426,25 @@ def compile_gap_task(
         concepts.append("products")
 
     schema_names = _schema_table_names(schema_payload)
-    tables = _match_tables(concepts, schema_names)
+    gap_blob = " ".join(clean_gaps)
+    tables = _explicit_schema_tables(gap_blob, schema_names)
+    if not tables:
+        explicit_from_question = _explicit_schema_tables(base_question, schema_names)
+        # Prefer a table not already represented by the seed query: gap fill is
+        # complementary evidence, not a replay of the prior total.
+        prior_sql = str(pq.get("sql") or "").lower()
+        unqueried = [t for t in explicit_from_question if t.lower() not in prior_sql]
+        tables = unqueried or explicit_from_question[:1]
+    if not tables:
+        tables = _match_tables(concepts, schema_names)
+
+    physical_dimensions = _resolve_dimension_columns(dimensions, tables, schema_payload)
+    if physical_dimensions != dimensions:
+        notes.append(
+            "resolved dimensions: "
+            + ", ".join(f"{src}->{dst}" for src, dst in zip(dimensions, physical_dimensions))
+        )
+        dimensions = physical_dimensions
 
     # If schema empty, keep concept tokens as soft table hints
     soft_tables = tables if tables else list(concepts)

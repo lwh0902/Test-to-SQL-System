@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from app.a2a.contracts import A2AMessage
 from app.agents.harness import AgentHarness, AgentSkill, HarnessContext
@@ -180,6 +181,67 @@ class ReviewHarness(AgentHarness):
     EVIDENCE_REQUIRED_TITLES = frozenset({"关键发现", "归因链路", "业务影响与建议"})
     CAUSAL_MARKERS = ("导致", "因为", "因此", "所以", "归因于", "caused", "because", "therefore")
 
+    @staticmethod
+    def _evidence_numbers(query: dict) -> list[float]:
+        queries = query.get("evidence_queries") if isinstance(query, dict) else None
+        if not isinstance(queries, list) or not queries:
+            queries = [query]
+        values: list[float] = []
+        total_rows_count = 0.0
+        for item in queries[:6]:
+            if not isinstance(item, dict):
+                continue
+            rows = [r for r in (item.get("rows") or [])[:100] if isinstance(r, dict)]
+            try:
+                rows_count = float(item.get("rows_count") or len(rows))
+                values.append(rows_count)
+                total_rows_count += rows_count
+            except Exception:
+                pass
+            column_values: dict[str, list[float]] = {}
+            for row in rows:
+                for key, raw in row.items():
+                    nums: list[float] = []
+                    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                        nums = [float(raw)]
+                    elif isinstance(raw, str):
+                        nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", raw)]
+                    values.extend(nums)
+                    column_values.setdefault(str(key), []).extend(nums)
+            for nums in column_values.values():
+                if len(nums) > 1:
+                    values.append(sum(nums))
+        values.append(total_rows_count)
+        base = list(dict.fromkeys(round(v, 8) for v in values if abs(v) < 1e15))[:120]
+        derived = list(base)
+        for a in base:
+            for b in base:
+                if b:
+                    derived.append(a * 100.0 / b)
+                derived.append(abs(a - b))
+        return derived[:20000]
+
+    @classmethod
+    def _unsupported_report_numbers(cls, query: dict, report: dict) -> list[str]:
+        supported = cls._evidence_numbers(query)
+        unsupported: list[str] = []
+        critical_titles = {"数据范围与口径", "关键发现"}
+        for section in report.get("sections") or []:
+            if not isinstance(section, dict) or section.get("title") not in critical_titles:
+                continue
+            text = str(section.get("content") or "")
+            for token in re.findall(r"\d+(?:\.\d+)?", text):
+                value = float(token)
+                # Ignore list ordinals/small integer prose; decimals and material
+                # values still require support.
+                if "." not in token and value <= 10:
+                    continue
+                tolerance = max(0.11, abs(value) * 0.006)
+                if not any(abs(value - evidence) <= tolerance for evidence in supported):
+                    if token not in unsupported:
+                        unsupported.append(token)
+        return unsupported[:8]
+
     def __init__(self):
         super().__init__(
             "review",
@@ -242,6 +304,10 @@ class ReviewHarness(AgentHarness):
                 hedge = any(h in content for h in ("假设", "可能", "或", "待验证", "hypothesis"))
                 if causal and not hedge and not eids:
                     reasons.append("归因链路存在无证据因果表述，须标为假设。")
+
+        unsupported_numbers = self._unsupported_report_numbers(query, report)
+        if unsupported_numbers:
+            reasons.append("报告包含证据外数字: " + ", ".join(unsupported_numbers))
 
         blob = json.dumps(report, ensure_ascii=False).lower() if report else ""
         for bad in ("password", "api_key", "secret", "credential"):
@@ -306,6 +372,7 @@ class ReviewHarness(AgentHarness):
 
     async def execute(self, ctx: HarnessContext) -> dict:
         m = ctx.message
+        report = ctx.allowed_inputs.get("report") or m.payload.get("report") or {}
         rule_reasons = self._review_reasons(m, ctx.allowed_inputs)
         llm_error = None
         llm_reasons: list[str] = []
@@ -315,12 +382,25 @@ class ReviewHarness(AgentHarness):
             ok = False
             reasons = rule_reasons
             review_mode = "rules_only"
+        elif report.get("generation_mode") == "deterministic_evidence_fallback":
+            # This report contains only literal, rule-audited query facts. An
+            # LLM veto here can itself hallucinate mismatches (for example,
+            # comparing rows_count with a bounded preview), so rules are the
+            # authoritative reviewer for this deliberately constrained mode.
+            ok = True
+            reasons = []
+            review_mode = "deterministic_evidence_fallback"
         else:
             llm_ok, llm_reasons, llm_error = await self._llm_review(ctx)
             if llm_ok is None:
-                ok = True
-                reasons = []
-                review_mode = "rules_fallback"
+                if report.get("generation_mode") == "deterministic_evidence_fallback":
+                    ok = True
+                    reasons = []
+                    review_mode = "deterministic_evidence_fallback"
+                else:
+                    ok = False
+                    reasons = ["Review 模型不可用，非确定性报告禁止放行。"]
+                    review_mode = "llm_unavailable_fail_closed"
             elif llm_ok:
                 ok = True
                 reasons = []

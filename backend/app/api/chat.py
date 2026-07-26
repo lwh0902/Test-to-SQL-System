@@ -1,21 +1,31 @@
-"""/api/chat 路由 - 支持 space_id + session_id，SSE 流式和 JSON"""
+"""/api/chat 路由 - 传输适配层：JSON / SSE 均走 AnalysisApplicationService。"""
 
-import os
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 
-from app.models.schemas import ChatRequest, ChatResponse, TraceStep, QueryIntent, ChartConfig
-from app.services.agent import get_graph, AgentState
-from app.services.persistence import save_message, save_trace
-from app.services.trace_store import trace_store
+from app.application.analysis_service import AnalysisApplicationService, get_analysis_service
+from app.application.contracts import TurnRequest
+from app.application.sse_protocol import SseTerminalGuard
 from app.core.auth import get_current_user
 from app.core.database import engine
-from app.services.authorization_service import require_space_access, require_session_access, require_trace_access
 from app.core.rate_limit import limiter
-from fastapi import Request
+from app.models.schemas import (
+    ChartConfig,
+    ChatRequest,
+    ChatResponse,
+    MetricCandidate,
+    QueryIntent,
+    TraceStep,
+)
+from app.services.authorization_service import (
+    require_session_access,
+    require_space_access,
+    require_trace_access,
+)
+from app.services.trace_store import trace_store
 
 router = APIRouter()
 
@@ -67,167 +77,133 @@ def list_traces(limit: int = 20, user: dict = Depends(get_current_user)):
     return {"traces": traces}
 
 
-# ======== SSE 流式接口（LangGraph） — 异步 ========
-
-_async_llm_client = None
-
-
-def _get_async_llm_client():
-    global _async_llm_client
-    if _async_llm_client is None:
-        from anthropic import AsyncAnthropic
-        _async_llm_client = AsyncAnthropic(
-            api_key=os.getenv("LLM_API_KEY"),
-            base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic"),
-        )
-    return _async_llm_client
+def _turn_request(req: ChatRequest, user: dict) -> TurnRequest:
+    return TurnRequest.from_chat(req, user)
 
 
-def _should_generate_analysis_answer(response_type: str, has_data: bool, has_plan: bool) -> bool:
-    """Only metric/data query answers should get the analysis-summary pass."""
-    return not has_plan and response_type == "answer"
+def _to_chat_response(public: dict) -> ChatResponse:
+    intent = public.get("intent")
+    intent_obj = None
+    if intent:
+        if isinstance(intent, QueryIntent):
+            intent_obj = intent
+        elif isinstance(intent, dict):
+            try:
+                intent_obj = QueryIntent(**intent)
+            except Exception:
+                intent_obj = None
 
+    chart = public.get("chart")
+    chart_obj = None
+    if chart and isinstance(chart, dict):
+        try:
+            chart_obj = ChartConfig(**chart)
+        except Exception:
+            chart_obj = None
+    elif isinstance(chart, ChartConfig):
+        chart_obj = chart
+
+    candidates = public.get("candidates") or []
+    candidate_objs = []
+    for c in candidates:
+        if isinstance(c, dict):
+            try:
+                candidate_objs.append(MetricCandidate(**c))
+            except Exception:
+                pass
+        elif isinstance(c, MetricCandidate):
+            candidate_objs.append(c)
+
+    trace_steps = []
+    for t in public.get("trace") or []:
+        if isinstance(t, dict):
+            try:
+                trace_steps.append(TraceStep(**t))
+            except Exception:
+                pass
+        elif isinstance(t, TraceStep):
+            trace_steps.append(t)
+
+    evidence = public.get("evidence") if isinstance(public.get("evidence"), dict) else None
+    artifacts = public.get("artifacts") if isinstance(public.get("artifacts"), list) else []
+    q_out = public.get("query_outcome") if isinstance(public.get("query_outcome"), dict) else None
+    sup = public.get("supervisor_decision") if isinstance(public.get("supervisor_decision"), dict) else None
+    tspec = public.get("task_spec") if isinstance(public.get("task_spec"), dict) else None
+    clarify_slots = list(public.get("clarify_slots") or [])
+    if not clarify_slots and evidence:
+        clarify_slots = list(evidence.get("clarify_slots") or [])
+    ux_hints = list(public.get("ux_hints") or [])
+    if not ux_hints and evidence:
+        ux_hints = list(evidence.get("ux_hints") or [])
+    next_actions = list(public.get("next_actions") or [])
+    if not next_actions and evidence:
+        next_actions = list(evidence.get("next_actions") or [])
+
+    return ChatResponse(
+        type=public.get("type") or public.get("response_type") or "answer",
+        trace_id=public.get("trace_id") or "",
+        answer=public.get("answer") or public.get("message") or "",
+        message=public.get("message") or public.get("answer") or "",
+        intent=intent_obj,
+        sql=public.get("sql") or "",
+        columns=list(public.get("columns") or []),
+        rows=list(public.get("rows") or []),
+        rows_count=public.get("rows_count"),
+        chart=chart_obj,
+        candidates=candidate_objs,
+        trace=trace_steps,
+        terminal_status=public.get("terminal_status") or None,
+        evidence=evidence,
+        artifacts=[a for a in artifacts if isinstance(a, dict)],
+        query_outcome=q_out,
+        supervisor_decision=sup,
+        task_spec=tspec,
+        clarify_slots=clarify_slots,
+        ux_hints=ux_hints,
+        next_actions=[a for a in next_actions if isinstance(a, dict)],
+        stop_reason=public.get("stop_reason") or None,
+        kernel_route=public.get("kernel_route") or None,
+        task_id=public.get("task_id"),
+    )
+
+
+# ======== SSE 流式接口 — 传输适配 ========
 
 @router.post("/api/chat/stream")
 @limiter.limit("30/minute")
 async def chat_stream(request: Request, req: ChatRequest, user: dict = Depends(get_current_user)):
     require_space_access(req.space_id, user["user_id"])
     require_session_access(req.session_id, user["user_id"], req.space_id)
-    graph = get_graph()
 
-    user_role = user.get("role", "tester")
-    user_id = user.get("user_id", 1)
-
-    initial_state = AgentState(
-        question=req.question,
-        user_role=user_role,
-        workspace_id=req.workspace_id,
-        space_id=req.space_id,
-        user_id=user_id,
-        session_id=req.session_id,
-        selected_metric=req.selected_metric,
-        selected_query_type=req.selected_query_type,
-    )
+    turn_req = _turn_request(req, user)
+    service = get_analysis_service()
 
     async def event_generator():
-        accumulated: dict = {}
-        sent_count = 0
-        async for output in graph.astream(initial_state):
-            for node_name, node_output in output.items():
-                if not node_output:
-                    continue
-                accumulated.update({k: v for k, v in node_output.items() if v is not None and v != "" and v != [] and v != {}})
-
-                events = node_output.get("events", [])
-                for evt in events[sent_count:]:
-                    yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'], ensure_ascii=False)}\n\n"
-                sent_count = len(events)
-
-        has_plan = bool(accumulated.get("plan"))
-        response_type = accumulated.get("response_type", "answer")
-        has_data = response_type == "answer" and bool(accumulated.get("rows"))
-        answer_text = ""
-
-        # 加载历史上下文用于回答生成
-        history_lines = []
-        if req.session_id:
-            from app.services.persistence import load_recent_messages
-            history = load_recent_messages(req.session_id, limit=6, user_id=user_id, space_id=req.space_id)
-            for msg in history:
-                role_label = "用户" if msg["role"] == "user" else "AI"
-                line = f"{role_label}: {msg['content']}"
-                if msg["role"] == "assistant" and msg.get("meta"):
-                    meta = msg["meta"]
-                    if isinstance(meta, str):
-                        import json as _json
-                        meta = _json.loads(meta)
-                    rows_count = meta.get("rows_count", 0)
-                    if meta.get("sql"):
-                        line += f" (执行了SQL，返回{rows_count}条数据)"
-                history_lines.append(line)
-
-        if _should_generate_analysis_answer(response_type, has_data, has_plan):
-            try:
-                client = _get_async_llm_client()
-
-                intent = accumulated.get("intent")
-                metric_name = ""
-                if intent:
-                    if isinstance(intent, QueryIntent):
-                        metric_name = intent.metric or ""
-                    elif isinstance(intent, dict):
-                        metric_name = intent.get("metric", "")
-
-                rows = accumulated.get("rows", [])
-                columns = accumulated.get("columns", [])
-                data_summary = ""
-                if rows and columns:
-                    preview_rows = rows[:5]
-                    data_summary = "数据列: " + ", ".join(columns) + "\n"
-                    for i, row in enumerate(preview_rows):
-                        data_summary += f"第{i+1}行: " + ", ".join(f"{c}={row.get(c)}" for c in columns) + "\n"
-                    if len(rows) > 5:
-                        data_summary += f"...共 {len(rows)} 行\n"
-                elif columns:
-                    data_summary = f"查询执行成功，列: {', '.join(columns)}，但返回了 0 条数据。\n"
-
-                prompt = f"你是 DataPilot Agent 数据分析助手。\n\n"
-                if history_lines:
-                    prompt += "历史对话:\n" + "\n".join(history_lines) + "\n\n"
-                prompt += f"用户当前查询了指标 '{metric_name}'，查询结果如下：\n\n"
-                prompt += f"{data_summary}\n"
-                if not rows:
-                    prompt += "查询返回了 0 条数据。请结合用户的问题和历史对话，分析可能的原因（如时间范围内无数据、筛选条件过严等），并给出建议。2-3句话即可。\n"
-                else:
-                    prompt += "请用简洁的中文总结查询结果（2-3句话），包含关键数字和趋势。不要重复原始数据。"
-
-                yield f"event: answer_generating\ndata: {json.dumps({'text': '正在生成分析结论'}, ensure_ascii=False)}\n\n"
-
-                async with client.messages.stream(
-                    model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
-                    max_tokens=256,
-                    messages=[{"role": "user", "content": prompt}],
-                ) as stream:
-                    async for text in stream.text_stream:
-                        answer_text += text
-                        yield f"event: answer_chunk\ndata: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
-            except Exception:
-                answer_text = accumulated.get("message", "")
-        else:
-            answer_text = accumulated.get("message", "")
-
-        complete_data = {
-            "type": accumulated.get("response_type", "answer"),
-            "trace_id": accumulated.get("trace_id", ""),
-            "answer": answer_text,
-            "sql": accumulated.get("sql", ""),
-            "columns": accumulated.get("columns", []),
-            "rows": accumulated.get("rows", []),
-            "message": answer_text,
-            "candidates": accumulated.get("candidates", []),
-            "chart": accumulated.get("chart"),
-            "trace": accumulated.get("trace", []),
-            "plan": accumulated.get("plan"),
-            "plan_results": accumulated.get("plan_results"),
-        }
-
-        # data_map 类型：从 trace 中提取结构化数据
-        if accumulated.get("response_type") == "data_map":
-            for step in (accumulated.get("trace") or []):
-                if step.get("node") == "schema_help_responder" and step.get("output"):
-                    output = step["output"]
-                    if output.get("data_map"):
-                        complete_data["data_map"] = output["data_map"]
-                    if output.get("db_identity"):
-                        complete_data["db_identity"] = output["db_identity"]
-                    break
-        intent = accumulated.get("intent")
-        if intent:
-            if isinstance(intent, QueryIntent):
-                complete_data["intent"] = intent.model_dump()
-            elif isinstance(intent, dict):
-                complete_data["intent"] = intent
-        yield f"event: complete\ndata: {json.dumps(complete_data, ensure_ascii=False)}\n\n"
+        guard = SseTerminalGuard()
+        async for event_name, data in service.handle_turn_stream(turn_req):
+            frame = guard.try_emit(event_name, data if isinstance(data, dict) else {})
+            if frame is not None:
+                yield frame
+        # If service forgot complete, emit a minimal terminal once
+        if not guard.closed:
+            frame = guard.try_emit(
+                "complete",
+                {
+                    "type": "error",
+                    "message": "服务未返回终态",
+                    "terminal_status": "STOP_ERROR",
+                    "kernel_route": "legacy_rollback",
+                    "trace_id": "",
+                    "rows": [],
+                    "rows_count": 0,
+                    "columns": [],
+                    "sql": "",
+                    "candidates": [],
+                    "trace": [],
+                },
+            )
+            if frame:
+                yield frame
 
     return StreamingResponse(
         event_generator(),
@@ -240,72 +216,22 @@ async def chat_stream(request: Request, req: ChatRequest, user: dict = Depends(g
     )
 
 
-# ======== JSON 接口 ========
+# ======== JSON 接口 — 传输适配 ========
 
 @router.post("/api/chat", response_model=ChatResponse)
 @limiter.limit("30/minute")
 async def chat(request: Request, req: ChatRequest, user: dict = Depends(get_current_user)):
     require_space_access(req.space_id, user["user_id"])
     require_session_access(req.session_id, user["user_id"], req.space_id)
-    graph = get_graph()
 
-    user_role = user.get("role", "tester")
-    user_id = user.get("user_id", 1)
+    turn_req = _turn_request(req, user)
+    service = get_analysis_service()
+    result = await service.handle_turn(turn_req)
+    public = result.to_public_dict()
+    return _to_chat_response(public)
 
-    initial_state = AgentState(
-        question=req.question,
-        user_role=user_role,
-        workspace_id=req.workspace_id,
-        space_id=req.space_id,
-        user_id=user_id,
-        session_id=req.session_id,
-        selected_metric=req.selected_metric,
-        selected_query_type=req.selected_query_type,
-    )
 
-    result = await graph.ainvoke(initial_state)
-
-    intent = result.get("intent")
-    intent_obj = None
-    if intent:
-        if isinstance(intent, QueryIntent):
-            intent_obj = intent
-        elif isinstance(intent, dict):
-            intent_obj = QueryIntent(**intent)
-
-    chart = result.get("chart")
-    chart_obj = None
-    if chart and isinstance(chart, dict):
-        chart_obj = ChartConfig(**chart)
-    elif isinstance(chart, ChartConfig):
-        chart_obj = chart
-
-    candidates = result.get("candidates", [])
-    candidate_objs = []
-    for c in candidates:
-        if isinstance(c, dict):
-            from app.models.schemas import MetricCandidate
-            candidate_objs.append(MetricCandidate(**c))
-        else:
-            candidate_objs.append(c)
-
-    trace_steps = []
-    for t in result.get("trace", []):
-        if isinstance(t, dict):
-            trace_steps.append(TraceStep(**t))
-        else:
-            trace_steps.append(t)
-
-    return ChatResponse(
-        type=result.get("response_type", "answer"),
-        trace_id=result.get("trace_id", ""),
-        answer=result.get("message", ""),
-        message=result.get("message", ""),
-        intent=intent_obj,
-        sql=result.get("sql", ""),
-        columns=result.get("columns", []),
-        rows=result.get("rows", []),
-        chart=chart_obj,
-        candidates=candidate_objs,
-        trace=trace_steps,
-    )
+# Re-export for tests that still patch get_graph at chat module level
+def get_graph():
+    from app.services.agent import get_graph as _gg
+    return _gg()
