@@ -1,7 +1,7 @@
 # Unseen MySQL Semantic Gate
 
 - status: **READY_FOR_INTERNAL_PILOT**
-- commit_sha: `9048001bb8ddc65c288f361e6b293a9f8d4c4e79`
+- commit_sha: `5798f5e415efdc26669aea31320febf29d581f43`
 - working_tree_clean: `True`
 - tests: 52
 - failures: 0
