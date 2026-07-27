@@ -143,3 +143,7 @@ body {
 @keyframes blink {
   50% { opacity: 0; }
 }
+
+/* Session list: reveal delete affordance on hover only */
+.dp-session-item .dp-session-action { opacity: 0; transition: opacity 0.15s ease; }
+.dp-session-item:hover .dp-session-action { opacity: 0.75; }

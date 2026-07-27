@@ -5,6 +5,7 @@
 
 import json
 import uuid
+from typing import Any
 
 from sqlalchemy import text
 
@@ -98,22 +99,183 @@ def auto_rename_session(session_id: str | None, question: str):
         pass
 
 
-def save_message(session_id: str | None, role: str, content: str, meta: dict | None = None):
-    """保存单条消息到 chat_messages，并更新 session 时间戳"""
+def _session_owned(
+    conn,
+    session_id: str,
+    *,
+    user_id: int | None = None,
+    space_id: str | None = None,
+) -> bool:
+    """True when session exists and matches optional user/space isolation keys."""
+    if user_id is None and space_id is None:
+        row = conn.execute(
+            text("SELECT id FROM chat_sessions WHERE id = :sid"),
+            {"sid": session_id},
+        ).fetchone()
+        return bool(row)
+    clauses = ["id = :sid"]
+    params: dict = {"sid": session_id}
+    if user_id is not None:
+        clauses.append("user_id = :user_id")
+        params["user_id"] = int(user_id)
+    if space_id is not None:
+        clauses.append("space_id = :space_id")
+        params["space_id"] = str(space_id)
+    row = conn.execute(
+        text(f"SELECT id FROM chat_sessions WHERE {' AND '.join(clauses)}"),
+        params,
+    ).fetchone()
+    return bool(row)
+
+
+def save_message(
+    session_id: str | None,
+    role: str,
+    content: str,
+    meta: dict | None = None,
+    *,
+    user_id: int | None = None,
+    space_id: str | None = None,
+):
+    """保存单条消息到 chat_messages，并更新 session 时间戳。
+
+    When user_id/space_id are provided, refuse writes to sessions outside that
+    isolation boundary (user × session × space).
+    """
     if not session_id:
         return
     msg_id = uuid.uuid4().hex[:16]
     with engine.connect() as conn:
+        if not _session_owned(conn, session_id, user_id=user_id, space_id=space_id):
+            return
         conn.execute(text("""
             INSERT INTO chat_messages (id, session_id, role, content, meta)
             VALUES (:id, :sid, :role, :content, :meta)
         """), {
             "id": msg_id, "sid": session_id, "role": role,
-            "content": content,
-            "meta": json.dumps(meta, ensure_ascii=False) if meta else None,
+            "content": content or "",
+            "meta": json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
         })
-        conn.execute(text("UPDATE chat_sessions SET updated_at = NOW() WHERE id = :sid"), {"sid": session_id})
+        if user_id is not None and space_id is not None:
+            conn.execute(
+                text(
+                    "UPDATE chat_sessions SET updated_at = NOW() "
+                    "WHERE id = :sid AND user_id = :user_id AND space_id = :space_id"
+                ),
+                {"sid": session_id, "user_id": int(user_id), "space_id": str(space_id)},
+            )
+        else:
+            conn.execute(
+                text("UPDATE chat_sessions SET updated_at = NOW() WHERE id = :sid"),
+                {"sid": session_id},
+            )
         conn.commit()
+
+
+def persist_turn_result(
+    *,
+    session_id: str | None,
+    user_id: int,
+    space_id: str,
+    question: str,
+    result: Any,
+    rename: bool = True,
+) -> bool:
+    """Persist one user turn + assistant TurnResult under user/session/space isolation.
+
+    Returns True when both messages were written. Safe no-op when session_id missing
+    or session is not owned by (user_id, space_id).
+    """
+    if not session_id or not question:
+        return False
+    # Accept TurnResult dataclass or public dict
+    if hasattr(result, "to_public_dict") and callable(getattr(result, "to_public_dict")):
+        public = result.to_public_dict()
+    elif isinstance(result, dict):
+        public = result
+    else:
+        return False
+
+    answer = (
+        public.get("answer")
+        or public.get("message")
+        or public.get("content")
+        or ""
+    )
+    if not isinstance(answer, str):
+        answer = str(answer)
+
+    rows = list(public.get("rows") or [])
+    raw_trace = list(public.get("trace") or [])
+    _META_ROWS_CAP = 200
+    meta: dict[str, Any] = {
+        "type": public.get("type") or public.get("response_type") or "answer",
+        "trace_id": public.get("trace_id") or "",
+        "sql": public.get("sql") or "",
+        "columns": list(public.get("columns") or []),
+        "rows_count": int(public.get("rows_count") or len(rows) or 0),
+        "rows": rows[:_META_ROWS_CAP],
+        "terminal_status": public.get("terminal_status") or "",
+        "stop_reason": public.get("stop_reason") or "",
+        "kernel_route": public.get("kernel_route") or "",
+        "trace": [
+            {
+                "node": (s or {}).get("node") if isinstance(s, dict) else None,
+                "status": (s or {}).get("status") if isinstance(s, dict) else None,
+                "elapsed_ms": (s or {}).get("elapsed_ms") if isinstance(s, dict) else None,
+            }
+            for s in raw_trace
+            if isinstance(s, dict) or s is not None
+        ],
+    }
+    for key in (
+        "chart",
+        "candidates",
+        "intent",
+        "data_map",
+        "db_identity",
+        "analysis_spec",
+        "query_outcome",
+        "evidence",
+        "artifacts",
+        "task_id",
+        "clarify_slots",
+        "ux_hints",
+        "next_actions",
+        "supervisor_decision",
+        "task_spec",
+        "active_state_version",
+    ):
+        val = public.get(key)
+        if val not in (None, "", [], {}):
+            meta[key] = val
+
+    # Ownership-gated writes
+    with engine.connect() as conn:
+        if not _session_owned(conn, session_id, user_id=int(user_id), space_id=str(space_id)):
+            return False
+
+    save_message(
+        session_id,
+        "user",
+        question,
+        user_id=int(user_id),
+        space_id=str(space_id),
+    )
+    save_message(
+        session_id,
+        "assistant",
+        answer,
+        meta,
+        user_id=int(user_id),
+        space_id=str(space_id),
+    )
+    if rename:
+        try:
+            auto_rename_session(session_id, question)
+        except Exception:
+            pass
+    return True
 
 
 def save_trace(
@@ -183,12 +345,22 @@ def persist_from_agent_state(state):
     save_message(session_id, "user", state.question)
 
     # 2. 构建 assistant 消息的 meta
+    # rows 有上限地写入 meta，保证刷新历史后图表/数据表/单值卡可恢复；
+    # trace 只存精简版（node/status/elapsed），完整 trace 走 /api/traces。
+    _META_ROWS_CAP = 200
+    rows = getattr(state, "rows", None) or []
+    raw_trace = getattr(state, "trace", None) or []
     meta = {
         "type": state.response_type,
         "trace_id": state.trace_id,
         "sql": state.sql,
         "columns": state.columns,
-        "rows_count": len(state.rows),
+        "rows_count": len(rows),
+        "rows": rows[:_META_ROWS_CAP],
+        "trace": [
+            {"node": s.get("node"), "status": s.get("status"), "elapsed_ms": s.get("elapsed_ms")}
+            for s in raw_trace
+        ],
     }
     if state.chart:
         meta["chart"] = state.chart

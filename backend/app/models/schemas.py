@@ -54,17 +54,34 @@ class MetricCandidate(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    type: str  # answer | clarification | error
+    type: str  # answer | clarification | error | deep_diagnosis | ...
     trace_id: str
     answer: str | None = None
     intent: QueryIntent | None = None
     sql: str | None = None
     columns: list[str] = []
     rows: list[dict] = []
+    rows_count: int | None = None
     chart: ChartConfig | None = None
     trace: list[TraceStep] = []
     message: str | None = None
     candidates: list[MetricCandidate] = []
+    # R1a canonical terminal fields (JSON/SSE parity)
+    terminal_status: str | None = None
+    stop_reason: str | None = None
+    kernel_route: str | None = None
+    task_id: str | None = None
+    # UX / observability (optional; frontend uses when present)
+    evidence: dict | None = None
+    artifacts: list[dict] = []
+    query_outcome: dict | None = None
+    supervisor_decision: dict | None = None
+    task_spec: dict | None = None
+    clarify_slots: list[str] = []
+    ux_hints: list[str] = []
+    next_actions: list[dict] = []
+    data_map: dict | None = None
+    db_identity: dict | None = None
 
 
 class GuardCheckResult(BaseModel):

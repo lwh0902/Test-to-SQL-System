@@ -11,6 +11,8 @@
 8. 禁止危险函数
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import sqlglot
@@ -32,6 +34,36 @@ class GuardResult:
     code: str | None = None
     message: str | None = None
     detail: str | None = None
+
+
+def _validate_limit_node(limit: exp.Limit | None, max_limit: int) -> tuple[bool, GuardResult | None]:
+    """Accept literal positive ints; allow bound params like :limit / ?."""
+    if limit is None:
+        return True, None
+    expr = limit.expression
+    # Parameterized limits (metric templates use LIMIT :limit) are OK — bound at execute time.
+    if isinstance(expr, exp.Placeholder):
+        return True, None
+    if isinstance(expr, exp.Column):
+        # e.g. malformed LIMIT ALL
+        return False, GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
+    try:
+        raw = expr.this if hasattr(expr, "this") else expr
+        if raw is None:
+            return False, GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
+        # float strings like 100.0
+        text = str(raw).strip()
+        if text.replace(".", "", 1).isdigit() and "." in text:
+            value = int(float(text))
+        else:
+            value = int(text)
+        if value <= 0:
+            return False, GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
+        if value > max_limit:
+            return False, GuardResult(False, "LIMIT_EXCEEDED", f"LIMIT 不能超过 {max_limit}")
+        return True, None
+    except (TypeError, ValueError, AttributeError):
+        return False, GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
 
 
 class FreeformSQLGuard:
@@ -112,11 +144,9 @@ class FreeformSQLGuard:
             return GuardResult(False, "NO_WHERE_NO_LIMIT", "查询缺少 WHERE 条件且无 LIMIT，可能扫描全表")
 
         limit = stmt.find(exp.Limit)
-        try:
-            if limit and int(limit.expression.this) > self.MAX_LIMIT:
-                return GuardResult(False, "LIMIT_EXCEEDED", f"LIMIT 不能超过 {self.MAX_LIMIT}")
-        except (ValueError, TypeError, AttributeError):
-            return GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
+        ok_limit, limit_err = _validate_limit_node(limit, self.MAX_LIMIT)
+        if not ok_limit:
+            return limit_err  # type: ignore[return-value]
 
         return GuardResult(True)
 
@@ -218,12 +248,9 @@ class SQLGuard:
             return GuardResult(False, "NO_LIMIT", "查询必须包含 LIMIT 子句")
 
         limit = stmt.find(exp.Limit)
-        try:
-            value = int(limit.expression.this)
-            if value > self.max_limit:
-                return GuardResult(False, "LIMIT_EXCEEDED", f"LIMIT 不能超过 {self.max_limit}")
-        except (TypeError, ValueError, AttributeError):
-            return GuardResult(False, "INVALID_LIMIT", "LIMIT 必须是正整数")
+        ok_limit, limit_err = _validate_limit_node(limit, self.max_limit)
+        if not ok_limit:
+            return limit_err  # type: ignore[return-value]
 
         return GuardResult(True)
 

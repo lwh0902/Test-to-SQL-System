@@ -28,6 +28,10 @@ from app.api.chat import router as chat_router
 from app.api.spaces import router as spaces_router
 from app.api.sessions import router as sessions_router
 from app.api.connections import router as connections_router
+from app.api.diagnosis import router as diagnosis_router
+from app.api.exports import router as exports_router
+from app.api.pilot import router as pilot_router
+from app.api.catalog import router as catalog_router
 
 app = FastAPI(
     title="DataPilot Agent",
@@ -61,8 +65,84 @@ app.include_router(spaces_router)
 app.include_router(sessions_router)
 app.include_router(chat_router)
 app.include_router(connections_router)
+app.include_router(diagnosis_router)
+app.include_router(exports_router)
+app.include_router(pilot_router)
+app.include_router(catalog_router)
+
+# Optional A2A lease worker (outbox retry). Enable with A2A_WORKER_ENABLED=true
+_a2a_worker = None
+
+
+@app.on_event("startup")
+async def _start_a2a_worker():
+    global _a2a_worker
+    # Small-pilot UX: auto-wire ecommerce + tech_quality mock DBs (idempotent).
+    try:
+        from app.application.default_mock_bootstrap import bootstrap_default_mocks
+
+        boot = bootstrap_default_mocks()
+        import logging
+
+        logging.getLogger(__name__).info(
+            "default_mock_bootstrap enabled=%s spaces=%s errors=%s",
+            boot.enabled,
+            [s.get("space_id") for s in boot.spaces],
+            boot.errors,
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).exception("default_mock_bootstrap failed")
+
+    if os.getenv("A2A_WORKER_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return
+    try:
+        import app.agents.deep_diagnosis  # noqa: F401 — register handlers
+        from app.a2a.worker import A2AWorker
+
+        _a2a_worker = A2AWorker()
+        _a2a_worker.start_background()
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("failed to start A2A worker")
+
+
+@app.on_event("shutdown")
+async def _stop_a2a_worker():
+    global _a2a_worker
+    if _a2a_worker is not None:
+        await _a2a_worker.stop()
+        _a2a_worker = None
 
 
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/bootstrap/mock-status")
+def mock_bootstrap_status():
+    """Readiness of the two preset mock spaces (no auth — pilot convenience)."""
+    from app.agents.catalog_repository import get_catalog_repository
+    from app.agents.semantic_catalog import analysis_allowed
+    from app.application.connection_registry import get_space_connection
+    from app.application.default_mock_bootstrap import PRESET_SPACES, auto_mock_enabled
+
+    out = []
+    for s in PRESET_SPACES:
+        sid = s["id"]
+        cat = get_catalog_repository().load(sid)
+        conn = get_space_connection(sid)
+        out.append(
+            {
+                "space_id": sid,
+                "name": s["name"],
+                "catalog_ready": bool(cat and analysis_allowed(cat)),
+                "connection_registered": bool(conn and conn.get("database")),
+                "database": (conn or {}).get("database"),
+                "table_count": len(cat.tables) if cat else 0,
+                "readiness": cat.readiness.to_dict() if cat and cat.readiness else None,
+            }
+        )
+    return {"auto_mock": auto_mock_enabled(), "spaces": out}

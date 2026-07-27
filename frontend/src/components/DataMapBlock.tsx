@@ -3,10 +3,8 @@ import { DatabaseOutlined } from '@ant-design/icons';
 import type { DataMap, DataMapQuestion } from '../services/api';
 import type { DbIdentity } from '../types';
 
-const BRAND_INK = '#FFFFFF';
 const BRAND_PANEL = 'rgba(255, 255, 255, 0.03)';
 const BRAND_CARD = 'rgba(255, 255, 255, 0.05)';
-const BRAND_LIME = '#C079FF';
 const BRAND_BORDER = 'rgba(255, 255, 255, 0.1)';
 const BRAND_MUTED = '#9B97AD';
 const BRAND_TEXT = '#F4F4F8';
@@ -35,7 +33,7 @@ export default function DataMapBlock({ dataMap, dbIdentity, compact = false, onQ
           background: BRAND_PANEL, borderRadius: 8, border: `1px solid ${BRAND_BORDER}`,
           fontSize: 12, color: BRAND_MUTED, flexWrap: 'wrap',
         }}>
-          <DatabaseOutlined style={{ color: BRAND_LIME }} />
+          <DatabaseOutlined style={{ color: BRAND_MUTED }} />
           <span>{dbIdentity.connection.db_type.toUpperCase()}</span>
           <span style={{ color: BRAND_TEXT }}>{dbIdentity.connection.db_name}</span>
           <span>{dbIdentity.connection.host_masked}:{dbIdentity.connection.port}</span>
@@ -63,9 +61,9 @@ export default function DataMapBlock({ dataMap, dbIdentity, compact = false, onQ
                 minHeight: compact ? 42 : 74,
                 borderRadius: compact ? 10 : 14,
                 cursor: onQuestionClick ? 'pointer' : 'default',
-                border: idx === 0 ? `1px solid ${BRAND_LIME}` : '1px solid rgba(255, 255, 255, 0.1)',
-                color: idx === 0 ? BRAND_INK : BRAND_TEXT,
-                background: idx === 0 ? BRAND_LIME : BRAND_CARD,
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                color: BRAND_TEXT,
+                background: idx === 0 ? 'rgba(255, 255, 255, 0.08)' : BRAND_CARD,
                 transition: 'all 0.2s',
                 fontSize: compact ? 12 : 15,
                 fontWeight: 700,

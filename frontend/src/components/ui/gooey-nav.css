@@ -1,14 +1,14 @@
 :root {
-  --color-1: #a558fb;
-  --color-2: #c079ff;
-  --color-3: #4922e5;
+  --color-1: #6e6a82;
+  --color-2: #9b97ad;
+  --color-3: #d8d8e0;
   --color-4: #ffffff;
 }
 
 .gooey-nav-container {
-  --color-1: #a558fb;
-  --color-2: #c079ff;
-  --color-3: #4922e5;
+  --color-1: #6e6a82;
+  --color-2: #9b97ad;
+  --color-3: #d8d8e0;
   --color-4: #ffffff;
   position: relative;
   width: 100%;
@@ -67,18 +67,21 @@
 }
 
 .gooey-nav-container nav ul li.active button {
-  color: #1a0f30;
-  font-weight: 700;
+  color: #F4F4F8;
+  font-weight: 600;
 }
 
 .gooey-nav-container nav ul li.active::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
   z-index: 1;
-  box-shadow: 0 4px 18px rgba(255, 255, 255, 0.18);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .gooey-nav-container.vertical nav ul li.active::after {

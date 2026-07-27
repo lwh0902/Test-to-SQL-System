@@ -96,7 +96,9 @@ def _add_event(state: AgentState, event_type: str, data: dict) -> None:
 # 规则路由 — 明确场景（零延迟，零成本）
 _RULE_CHAT = {"你好", "嗨", "hello", "hi", "谢谢", "感谢", "再见", "拜拜", "你是谁", "你叫什么", "你是什么", "介绍一下你", "今天天气", "讲个笑话"}
 _RULE_HELP = {"怎么用", "帮助", "help", "你能做什么", "使用说明", "支持哪些", "有什么指标", "怎么查"}
-_SCHEMA_HELP_KEYWORDS = ("有什么表", "数据库有什么", "有哪些数据", "能查什么", "可查什么", "数据结构", "表结构", "字段", "schema")
+_SCHEMA_HELP_KEYWORDS = ("有什么表", "数据库有什么", "有哪些数据", "能查什么", "可查什么", "数据结构", "表结构", "字段", "schema",
+                         "分别是干嘛", "分别都是干嘛", "各是干嘛", "都有什么用", "各有什么用", "有什么作用",
+                         "主要存什么", "都存什么", "这些表", "干什么用的", "干嘛用的")
 _DATABASE_PROFILE_KEYWORDS = (
     "接入的数据库", "当前数据库", "连接的数据库", "数据库是什么", "这个库是干嘛",
     "数据库是干嘛", "每个表的作用", "各个表的作用", "整体介绍", "数据库说明",
@@ -129,6 +131,28 @@ def _classify_table_intent(question: str) -> str:
     if any(p in q for p in _TABLE_VIEW_PATTERNS):
         return "table_query"
     return "schema_help"
+
+
+_VAGUE_FOLLOWUP_MAX_LEN = 12
+
+
+def _route_from_recent_context(state) -> str | None:
+    """极短/含糊追问（「?」「分别是干嘛的」未命中关键词时）：看上一轮 assistant 类型续路由。"""
+    q = state.question.strip()
+    if len(q) > _VAGUE_FOLLOWUP_MAX_LEN:
+        return None
+    try:
+        from app.services.persistence import load_recent_messages
+        messages = load_recent_messages(state.session_id, limit=2, user_id=state.user_id, space_id=state.space_id)
+    except Exception:
+        return None
+    last_assistant = next((m for m in reversed(messages) if m.get("role") == "assistant"), None)
+    if not last_assistant:
+        return None
+    meta = last_assistant.get("meta") or {}
+    if meta.get("type") in ("data_map", "schema_help"):
+        return "schema_help"
+    return None
 
 
 def _route_with_rules(question: str) -> str | None:
@@ -234,34 +258,55 @@ def _find_table_target(space_id: str, question: str) -> str | None:
 
 
 def intent_router(state: AgentState) -> dict:
-    """意图路由节点：分类后写入 state.route"""
-    from app.services.persistence import load_working_memory
+    """意图路由节点：Supervisor L1 主判（flash）+ L0/L2 级联，写入 state.route。
+
+    规则表仅作 L2 宕机/非法输出兜底（见 app.agents.supervisor_decision）。
+    """
+    from app.services.persistence import load_recent_messages, load_working_memory
+    from app.agents.supervisor_decision import decide as supervisor_decide
 
     question = state.question.strip()
 
     _add_event(state, "run_started", {"text": "开始分析你的问题"})
 
-    # 加载上一轮任务帧
+    # 加载上一轮任务帧 + 最近消息（供调度上下文）
     wm = load_working_memory(state.session_id, state.user_id, state.space_id)
     state.working_memory = wm
+    try:
+        recent = load_recent_messages(
+            state.session_id, limit=6, user_id=state.user_id, space_id=state.space_id
+        )
+    except Exception:
+        recent = []
 
-    # 1. 规则分类（零成本）
-    route = _route_with_rules(question)
+    decision = supervisor_decide(
+        question,
+        recent_messages=recent,
+        working_memory=wm,
+        space_id=state.space_id,
+    )
 
-    # 2. 检查是否需要 diagnosis（语义追问 + frame 有 no_data/error）
-    if route is None and _should_diagnose(question, wm):
-        route = "diagnosis"
+    # 追问改写：下游节点使用补全后的问题
+    if decision.resolved_question and decision.resolved_question.strip():
+        state.question = decision.resolved_question.strip()
 
-    # 3. 表名提及 → 区分 table_query vs schema_help
-    if route is None and _mentions_known_table(state.space_id, question):
-        route = _classify_table_intent(question)
-
-    # 4. LLM 兜底
-    if route is None:
-        route = _route_with_llm(question) or _fallback_route(question, wm)
-
+    route = decision.route
+    # P3: 显式深度诊断/报告 → deep_diagnosis playbook；其余 diagnosis 仍走轻量 no_data 诊断
+    _DEEP_DIAG_MARKERS = (
+        "深度诊断", "诊断报告", "生成报告", "生成深度", "分析报告",
+        "根因分析", "归因分析", "根因", "归因", "出份报告", "出个报告", "出报告",
+    )
+    if decision.intent == "diagnosis":
+        q_check = (decision.resolved_question or question or "")
+        if decision.layer == "L0" or any(m in q_check for m in _DEEP_DIAG_MARKERS):
+            route = "deep_diagnosis"
+        else:
+            route = "diagnosis"
     state.route = route
     state.trace_id = generate_trace_id()
+
+    # 安全决策事件（无 CoT / prompt / rows）
+    _add_event(state, "supervisor_decision", decision.safe_event()["data"])
 
     route_labels = {
         "data_query": "识别为数据查询",
@@ -270,6 +315,7 @@ def intent_router(state: AgentState) -> dict:
         "chat": "识别为普通对话",
         "help": "识别为帮助问题",
         "diagnosis": "识别为结果诊断",
+        "deep_diagnosis": "识别为深度诊断报告",
         "table_query": "识别为表数据查询",
         "database_profile": "识别为数据库档案",
         "schema_help": "识别为表结构查询",
@@ -279,10 +325,18 @@ def intent_router(state: AgentState) -> dict:
     _add_event(state, "route_done", {
         "route": route,
         "label": route_labels.get(route, f"识别为{route}"),
+        "layer": decision.layer,
+        "fallback_used": decision.fallback_used,
+        "confidence": decision.confidence,
     })
 
-    return {"route": state.route, "trace_id": state.trace_id, "events": state.events,
-            "working_memory": state.working_memory}
+    return {
+        "route": state.route,
+        "trace_id": state.trace_id,
+        "events": state.events,
+        "working_memory": state.working_memory,
+        "question": state.question,
+    }
 
 
 def context_resolver(state: AgentState) -> dict:
@@ -372,118 +426,219 @@ def context_resolver(state: AgentState) -> dict:
 
 
 def chat_responder(state: AgentState) -> dict:
-    """闲聊回复节点"""
-    from anthropic import Anthropic
+    """闲聊 — thin wrapper over unified answer_assembly (P2)。"""
+    from app.agents.answer_assembly import assemble_answer
+    from app.agents.model_adapter import ModelResponse, get_model_adapter
 
-    client = Anthropic(
-        api_key=os.getenv("LLM_API_KEY"),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.deepseek.com/anthropic"),
-    )
+    def _llm(req):
+        try:
+            return get_model_adapter().complete(req)
+        except Exception as e:
+            return ModelResponse(ok=False, error=str(e))
 
-    try:
-        response = client.messages.create(
-            model=os.getenv("LLM_MODEL", "deepseek-v4-flash"),
-            max_tokens=256,
-            system="你是 DataPilot Agent，一个 AI 数据分析助手。友好简短地回复用户的闲聊。不超过两句话。",
-            messages=[{"role": "user", "content": state.question}],
-        )
-        text = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                text = block.text.strip()
-                break
-        state.message = text or "你好！我是 DataPilot Agent，可以帮你查询数据分析。"
-    except Exception:
-        state.message = "你好！我是 DataPilot Agent，可以帮你查询数据分析。试试问我'最近7天销售额趋势'。"
-
-    state.response_type = "chat"
-    state.trace.append({"node": "chat_responder", "status": "done", "output": {}})
-
-    _add_event(state, "chat_response", {"status": "done"})
+    assembled = assemble_answer("chat", question=state.question, llm_complete=_llm)
+    state.message = assembled.message
+    state.response_type = assembled.response_type
+    state.trace.append({
+        "node": "chat_responder",
+        "status": "done",
+        "output": {"assembly": "answer_assembly", "source": assembled.source},
+    })
+    _add_event(state, "chat_response", {"status": "done", "source": assembled.source})
     return {"message": state.message, "response_type": state.response_type,
             "events": state.events, "trace": state.trace}
 
 
 def help_responder(state: AgentState) -> dict:
-    """帮助回复节点"""
-    metrics = list_metrics(state.space_id)
-    metric_list = "\n".join(f"  - {m['name']}：{m['description']}" for m in metrics)
+    """帮助 — thin wrapper over unified answer_assembly (P2)。"""
+    from app.agents.answer_assembly import assemble_answer
 
-    state.message = (
-        f"**DataPilot Agent 使用指南**\n\n"
-        f"你可以用自然语言向我提问，我会自动查询数据并生成图表。\n\n"
-        f"**当前空间支持的指标：**\n{metric_list}\n\n"
-        f"**示例问题：**\n"
-        f"  - 最近7天销售额趋势\n"
-        f"  - 按渠道拆解订单数\n"
-        f"  - 为什么最近成功率下降\n"
-    )
-    state.response_type = "help"
-    state.trace.append({"node": "help_responder", "status": "done", "output": {}})
-
-    _add_event(state, "help_response", {"status": "done"})
+    assembled = assemble_answer("help", space_id=state.space_id, metrics=list_metrics(state.space_id))
+    state.message = assembled.message
+    state.response_type = assembled.response_type
+    state.trace.append({
+        "node": "help_responder",
+        "status": "done",
+        "output": {"assembly": "answer_assembly", "source": assembled.source},
+    })
+    _add_event(state, "help_response", {"status": "done", "source": assembled.source})
     return {"message": state.message, "response_type": state.response_type,
             "events": state.events, "trace": state.trace}
 
 
 def schema_help_responder(state: AgentState) -> dict:
-    """数据地图回复节点 — 返回结构化 data_map"""
+    """schema_understanding — thin wrapper：answer_assembly + schema_inventory（P1/P2）。"""
+    from app.agents.answer_assembly import assemble_answer
+    from app.agents.schema_inventory import run_schema_inventory
     from app.services.data_map_service import get_data_map, get_db_identity
 
-    data_map = get_data_map(state.space_id)
-    db_identity = get_db_identity(state.space_id)
+    def _artifact_saver(*args, **kwargs):
+        try:
+            from app.services.agent_runtime_store import save_artifact
+            return save_artifact(*args, **kwargs)
+        except Exception:
+            return None
 
-    # 生成简要文字描述作为消息
-    summary = data_map.get("summary", {})
-    table_count = summary.get("table_count", 0)
-    field_count = summary.get("field_count", 0)
-    metric_count = summary.get("metric_count", 0)
+    def _runner(**kwargs):
+        kwargs.setdefault("space_id", state.space_id)
+        kwargs.setdefault("session_id", state.session_id)
+        kwargs.setdefault("user_id", state.user_id)
+        kwargs.setdefault("question", state.question or "")
+        if state.session_id and "artifact_saver" not in kwargs:
+            kwargs["artifact_saver"] = _artifact_saver
+        return run_schema_inventory(**kwargs)
 
-    if db_identity and db_identity.get("connection"):
-        conn = db_identity["connection"]
-        identity_line = f"当前连接到 {conn['db_type']} 数据库 `{conn['db_name']}`（{conn['host_masked']}:{conn['port']}），"
-    else:
-        identity_line = f"当前空间 `{state.space_id}`，"
-
-    state.message = (
-        f"{identity_line}共 {table_count} 张表、{field_count} 个字段、{metric_count} 个推荐指标。"
+    assembled = assemble_answer(
+        "schema",
+        question=state.question or "",
+        space_id=state.space_id,
+        session_id=state.session_id,
+        user_id=state.user_id,
+        inventory_runner=_runner,
     )
+    inventory = (assembled.meta or {}).get("inventory") or {}
+    db_identity = inventory.get("db_identity") if isinstance(inventory, dict) else None
 
-    state.response_type = "data_map"
-    # 存储结构化数据供 SSE 和前端使用
-    state.chart = None  # 不走图表路径
-    state.candidates = []  # 不走候选路径
-    # 通过 trace 传递 data_map 和 db_identity
+    try:
+        data_map = get_data_map(state.space_id)
+    except Exception:
+        data_map = {
+            "space_id": state.space_id,
+            "mode": (inventory or {}).get("source") or "schema",
+            "summary": (inventory or {}).get("summary") or {},
+            "tables": [
+                {
+                    "name": t.get("name"),
+                    "title": t.get("title"),
+                    "description": t.get("purpose"),
+                    "columns": t.get("columns") or [],
+                    "key_columns": t.get("key_columns") or [],
+                }
+                for t in ((inventory or {}).get("tables") or [])
+            ],
+            "metrics": (inventory or {}).get("metrics") or [],
+            "recommended_questions": [],
+        }
+    if db_identity is None:
+        try:
+            db_identity = get_db_identity(state.space_id)
+        except Exception:
+            db_identity = None
+
+    state.message = assembled.message
+    state.response_type = assembled.response_type
+    state.chart = None
+    state.candidates = []
+    cache_hit = bool((assembled.meta or {}).get("cache_hit"))
+    artifact_id = (assembled.meta or {}).get("artifact_id")
     state.trace.append({
         "node": "schema_help_responder",
         "status": "done",
-        "output": {"data_map": data_map, "db_identity": db_identity},
+        "output": {
+            "data_map": data_map,
+            "db_identity": db_identity,
+            "schema_inventory": inventory,
+            "inventory_cache_hit": cache_hit,
+            "inventory_artifact_id": artifact_id,
+            "answer_source": assembled.source,
+            "assembly": "answer_assembly",
+        },
     })
 
-    _add_event(state, "schema_help_response", {"status": "done"})
-    return {"message": state.message, "response_type": state.response_type,
-            "events": state.events, "trace": state.trace}
+    _add_event(state, "schema_help_response", {
+        "status": "done",
+        "cache_hit": cache_hit,
+        "table_count": ((inventory or {}).get("summary") or {}).get("table_count"),
+        "answer_source": assembled.source,
+    })
+    if artifact_id:
+        _add_event(state, "artifact_produced", {
+            "artifact_type": "SchemaInventory",
+            "artifact_id": artifact_id,
+            "source_agent": "query",
+        })
+
+    return {
+        "message": state.message,
+        "response_type": state.response_type,
+        "events": state.events,
+        "trace": state.trace,
+    }
 
 
 def database_profile_responder(state: AgentState) -> dict:
-    """数据库档案回复：连接身份 + 每张表作用 + 可问问题。"""
-    from app.services.data_map_service import render_database_profile
+    """数据库档案 — thin wrapper over answer_assembly（与 schema 共用 inventory 锚定）。"""
+    from app.agents.answer_assembly import assemble_answer
+    from app.agents.schema_inventory import run_schema_inventory
 
-    state.message = render_database_profile(state.space_id)
-    state.response_type = "answer"
-    state.trace.append({"node": "database_profile_responder", "status": "done", "output": {}})
+    def _runner(**kwargs):
+        kwargs.setdefault("space_id", state.space_id)
+        kwargs.setdefault("session_id", state.session_id)
+        kwargs.setdefault("user_id", state.user_id)
+        kwargs.setdefault("question", state.question or "")
+        return run_schema_inventory(**kwargs)
 
-    _add_event(state, "database_profile_response", {"status": "done"})
+    assembled = assemble_answer(
+        "database_profile",
+        question=state.question or "",
+        space_id=state.space_id,
+        session_id=state.session_id,
+        user_id=state.user_id,
+        inventory_runner=_runner,
+    )
+    state.message = assembled.message
+    state.response_type = assembled.response_type
+    state.trace.append({
+        "node": "database_profile_responder",
+        "status": "done",
+        "output": {
+            "assembly": "answer_assembly",
+            "source": assembled.source,
+            "schema_inventory": (assembled.meta or {}).get("inventory"),
+        },
+    })
+    _add_event(state, "database_profile_response", {
+        "status": "done",
+        "source": assembled.source,
+    })
     return {"message": state.message, "response_type": state.response_type,
             "events": state.events, "trace": state.trace}
 
 
 def clarification_responder(state: AgentState) -> dict:
-    state.response_type = "clarification"
-    state.message = "我还不能确定你的意图。请说明要查询的指标、时间范围，或告诉我是在继续上一轮的哪个维度。"
-    state.trace.append({"node": "clarification_responder", "status": "done", "output": {}})
+    """澄清 — thin wrapper over answer_assembly。"""
+    from app.agents.answer_assembly import assemble_answer
+
+    assembled = assemble_answer("clarification", question=state.question or "")
+    state.response_type = assembled.response_type
+    state.message = assembled.message
+    state.trace.append({
+        "node": "clarification_responder",
+        "status": "done",
+        "output": {"assembly": "answer_assembly"},
+    })
     _add_event(state, "clarification_response", {"status": "done"})
     return {"message": state.message, "response_type": state.response_type, "events": state.events, "trace": state.trace}
+
+
+def deep_diagnosis_marker(state: AgentState) -> dict:
+    """P3: mark deep diagnosis for chat_stream handoff to Supervisor playbook (no light handler)."""
+    state.response_type = "deep_diagnosis"
+    state.message = "正在启动深度诊断编排…"
+    state.route = "deep_diagnosis"
+    state.trace.append({
+        "node": "deep_diagnosis_marker",
+        "status": "done",
+        "output": {"handoff": "run_deep_diagnosis"},
+    })
+    _add_event(state, "deep_diagnosis_handoff", {"status": "pending", "route": "deep_diagnosis"})
+    return {
+        "message": state.message,
+        "response_type": state.response_type,
+        "route": state.route,
+        "events": state.events,
+        "trace": state.trace,
+    }
 
 
 def diagnosis_handler(state: AgentState) -> dict:
@@ -702,10 +857,17 @@ def permission_guard(state: AgentState) -> dict:
     if not result.passed:
         state.response_type = "error"
         state.message = result.message or "权限不足"
+        state.error_code = "PERMISSION_DENIED"
 
     state.trace.append({"node": "permission_guard", "status": "passed" if result.passed else "denied",
                         "output": {"passed": result.passed, "code": result.code}})
-    return {"response_type": state.response_type, "message": state.message, "events": state.events, "trace": state.trace}
+    return {
+        "response_type": state.response_type,
+        "message": state.message,
+        "error_code": state.error_code,
+        "events": state.events,
+        "trace": state.trace,
+    }
 
 
 def sql_generator(state: AgentState) -> dict:
@@ -746,10 +908,17 @@ def sql_guard_node(state: AgentState) -> dict:
     if not result.passed:
         state.response_type = "error"
         state.message = result.message or "SQL 安全校验未通过"
+        state.error_code = "SQL_REJECTED"
 
     state.trace.append({"node": "sql_guard", "status": "passed" if result.passed else "denied",
                         "output": {"passed": result.passed, "code": result.code, "message": result.message}})
-    return {"response_type": state.response_type, "message": state.message, "events": state.events, "trace": state.trace}
+    return {
+        "response_type": state.response_type,
+        "message": state.message,
+        "error_code": state.error_code,
+        "events": state.events,
+        "trace": state.trace,
+    }
 
 
 def _check_empty_result(sql: str, space_id: str | None, table_target: str | None = None) -> str | None:
@@ -857,48 +1026,56 @@ def query_executor(state: AgentState) -> dict:
         "columns": columns,
     })
 
+    from app.agents.answer_assembly import assemble_answer
+
+    empty_hint = None
+    if len(rows) == 0 and state.sql:
+        empty_hint = _check_empty_result(state.sql, state.space_id, state.table_target)
+
     if not state.intent:
-        if len(rows) == 0 and state.sql:
-            no_data_hint = _check_empty_result(state.sql, state.space_id, state.table_target)
-            state.message = no_data_hint or "当前查询没有返回数据。"
-        else:
-            target_label = state.table_target or "表数据"
-            state.message = f"查询到 {len(rows)} 条 {target_label} 数据。"
-        state.trace.append({"node": "query_executor", "status": "done",
-                            "output": {"rows": len(rows), "columns": columns}})
+        assembled = assemble_answer(
+            "data_conclusion",
+            rows=rows,
+            columns=columns,
+            table_target=state.table_target,
+            empty_hint=empty_hint,
+        )
+        state.message = assembled.message
+        state.trace.append({
+            "node": "query_executor",
+            "status": "done",
+            "output": {
+                "rows": len(rows),
+                "columns": columns,
+                "assembly": "answer_assembly",
+                "answer_source": assembled.source,
+            },
+        })
         return {"columns": columns, "rows": rows, "message": state.message, "chart": None,
                 "events": state.events, "trace": state.trace}
 
-    metric_names = {
-        "scan_success_rate": "扫描成功率", "scan_count": "扫描次数",
-        "error_distribution": "错误分布", "api_success_rate": "API成功率",
-        "api_response_time": "API响应时间", "feature_usage": "功能使用量",
-        "gmv": "销售额", "order_count": "订单数", "avg_order_value": "客单价",
-        "pay_conversion_rate": "支付转化率", "refund_rate": "退款率",
-        "product_sales_rank": "商品销量排行", "channel_sales": "渠道销售额",
-        "new_users": "新增用户数", "pay_user_count": "支付用户数",
-    }
-    label = metric_names.get(state.intent.metric, state.intent.metric)
-    if state.intent.query_type == "trend" and len(rows) > 1:
-        state.message = f"查询到 {len(rows)} 条{label}趋势数据。"
-    elif state.intent.query_type == "breakdown" and len(rows) > 1:
-        state.message = f"查询到 {len(rows)} 个分组的{label}数据。"
-    elif len(rows) == 1:
-        parts = [f"{col}={val}" for col, val in rows[0].items()]
-        state.message = f"{label}: {', '.join(parts)}"
-    else:
-        state.message = f"查询到 {len(rows)} 条{label}数据。"
-
-    # 0 行结果自检：检查表是否有数据，主动说明原因
-    if len(rows) == 0 and state.sql:
-        no_data_hint = _check_empty_result(state.sql, state.space_id, state.table_target)
-        if no_data_hint:
-            state.message = no_data_hint
+    assembled = assemble_answer(
+        "data_conclusion",
+        rows=rows,
+        columns=columns,
+        metric=state.intent.metric,
+        query_type=state.intent.query_type,
+        empty_hint=empty_hint,
+    )
+    state.message = assembled.message
 
     chart_config = get_chart_config(state.metric_config, state.intent.query_type or "fact")
 
-    state.trace.append({"node": "query_executor", "status": "done",
-                        "output": {"rows": len(rows), "columns": columns}})
+    state.trace.append({
+        "node": "query_executor",
+        "status": "done",
+        "output": {
+            "rows": len(rows),
+            "columns": columns,
+            "assembly": "answer_assembly",
+            "answer_source": assembled.source,
+        },
+    })
     return {"columns": columns, "rows": rows, "message": state.message, "chart": chart_config,
             "events": state.events, "trace": state.trace}
 
@@ -1474,6 +1651,8 @@ def route_intent(state: AgentState) -> str:
         return "plan_execute"
     if route == "diagnosis":
         return "diagnosis"
+    if route == "deep_diagnosis":
+        return "deep_diagnosis"
     if route == "table_query":
         return "table_query"
     if route == "clarification":
@@ -1492,6 +1671,7 @@ def build_graph() -> StateGraph:
     graph.add_node("schema_help_responder", schema_help_responder)
     graph.add_node("database_profile_responder", database_profile_responder)
     graph.add_node("clarification_responder", clarification_responder)
+    graph.add_node("deep_diagnosis_marker", deep_diagnosis_marker)
     graph.add_node("planner", planner)
     graph.add_node("freeform_sql_generator", freeform_sql_generator)
     graph.add_node("freeform_sql_guard", freeform_sql_guard_node)
@@ -1521,6 +1701,7 @@ def build_graph() -> StateGraph:
         "query": "planner",
         "plan_execute": "plan_generator",
         "diagnosis": "diagnosis_handler",
+        "deep_diagnosis": "deep_diagnosis_marker",
         "table_query": "table_query_handler",
         "clarification": "clarification_responder",
     })
@@ -1537,6 +1718,7 @@ def build_graph() -> StateGraph:
 
     # diagnosis → persister
     graph.add_edge("diagnosis_handler", "persister")
+    graph.add_edge("deep_diagnosis_marker", "persister")
 
     # table_query → freeform_sql_generator
     graph.add_edge("table_query_handler", "freeform_sql_generator")

@@ -51,7 +51,7 @@ export default function TracePanel({ trace, loading }: Props) {
                 ) : isDenied ? (
                   <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
                 ) : (
-                  <LoadingOutlined style={{ color: '#C079FF' }} />
+                  <LoadingOutlined style={{ color: '#9B97AD' }} />
                 )}
                 <span>{label}</span>
                 {isDone && <Tag color="success" style={{ marginLeft: 4 }}>通过</Tag>}

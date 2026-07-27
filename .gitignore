@@ -34,3 +34,6 @@ dist/
 
 # Database dumps
 *.sql.gz
+
+# Multi-agent export files
+backend/data/exports/
