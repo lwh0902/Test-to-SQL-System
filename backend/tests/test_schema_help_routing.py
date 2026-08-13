@@ -56,10 +56,14 @@ def test_schema_help_responder_returns_data_map(monkeypatch):
 
 def test_database_profile_responder_returns_database_file(monkeypatch):
     """数据库档案回复应该聚焦连接身份、表作用和可问问题，不返回完整 data_map 卡片"""
-    monkeypatch.setattr(
-        "app.services.data_map_service.render_database_profile",
-        lambda sid: "当前连接到 MySQL 数据库 `datacheck`。\n\n主要数据表：\n- api_logs：记录 API 调用日志。",
-    )
+    from app.agents.answer_assembly import AssembledAnswer
+
+    monkeypatch.setattr("app.agents.answer_assembly.assemble_answer", lambda *_args, **_kwargs: AssembledAnswer(
+        kind="database_profile",
+        message="当前连接到 MySQL 数据库 `datacheck`。\n\n主要数据表：\n- api_logs：记录 API 调用日志。",
+        response_type="answer",
+        source="inventory",
+    ))
     state = AgentState(question="现在接入的数据库是什么", space_id="tech_quality")
 
     result = database_profile_responder(state)

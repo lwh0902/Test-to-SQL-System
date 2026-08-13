@@ -16,7 +16,7 @@ from app.agents.analysis_spec import AnalysisSpec
 from app.agents.evidence import EvidenceBundle
 from app.agents.query_outcome import QueryOutcome, QueryOutcomeStatus
 from app.agents.semantic_catalog import SemanticCatalog
-from app.agents.spec_patch import looks_like_followup, patch_or_build
+from app.agents.spec_patch import PatchResult, looks_like_followup, patch_or_build
 
 
 ALLOWED_ACTIONS = {
@@ -68,6 +68,68 @@ class TurnResult:
     errors: list[str] = field(default_factory=list)
 
 
+def assemble_query_answer(
+    spec: AnalysisSpec,
+    outcome: QueryOutcome,
+    evidence: EvidenceBundle,
+) -> str:
+    """Build a deterministic answer that matches the query result shape."""
+    rows = list(outcome.rows_preview or [])
+    row_count = int(outcome.rows_count or len(rows))
+    label_aliases = {
+        "order_count": "订单数",
+        "gmv": "GMV",
+        "cancel_rate": "取消率",
+        "avg_order_value": "平均订单金额",
+    }
+    labels = [
+        label_aliases.get(m.business_label or "", m.business_label or m.source_field or "指标")
+        for m in spec.measures
+    ]
+    label = "、".join(labels)
+    is_detail = spec.task_type == "detail" or any(
+        (m.aggregation or "").lower() == "sample" for m in spec.measures
+    )
+    time_dimensions = [d for d in spec.dimensions if d.startswith("time:")]
+    business_dimensions = [d for d in spec.dimensions if not d.startswith("time:")]
+
+    if is_detail:
+        body = f"查询成功，返回 {row_count} 条明细。"
+    elif time_dimensions:
+        body = f"查询到 {row_count} 个时间点的{label}趋势数据。"
+    elif business_dimensions:
+        body = f"查询到 {row_count} 个分组的{label}数据。"
+        if rows:
+            first = rows[0]
+            dim_key = next(
+                (key for key in first if key not in {"value", *labels}),
+                next(iter(first), ""),
+            )
+            value_key = "value" if "value" in first else next(
+                (key for key in reversed(first) if key != dim_key), ""
+            )
+            if dim_key and value_key:
+                body += f"例如 {first.get(dim_key)}={first.get(value_key)}。"
+    elif len(spec.measures) > 1 and rows:
+        first = rows[0]
+        values = []
+        for index, measure in enumerate(spec.measures):
+            measure_label = measure.business_label or f"value_{index + 1}"
+            if measure_label in first:
+                values.append(f"{measure_label}={first[measure_label]}")
+        if not values:
+            values = [f"{key}={value}" for key, value in first.items()]
+        body = "查询结果：" + "，".join(values) + "。"
+    elif rows:
+        first = rows[0]
+        value = first.get("value", list(first.values())[-1])
+        body = f"{label}为 {value}。"
+    else:
+        body = "查询成功但结果为空。"
+
+    return body + evidence.answer_footer()
+
+
 def _observe(
     question: str,
     state: Optional[ActiveAnalysisState],
@@ -101,6 +163,8 @@ def run_turn(
     user_id: int = 0,
     space_id: str = "",
     allow_heavy: bool = False,
+    prebuilt_spec: Optional[AnalysisSpec] = None,
+    semantic_followup: bool = False,
 ) -> TurnResult:
     """One user turn: observe → decide → act (bounded)."""
     budget = budget or ControlledBudget()
@@ -131,7 +195,16 @@ def run_turn(
             latency_ms=(time.perf_counter() - t0) * 1000,
         )
 
-    patch = patch_or_build(question, catalog, state)
+    patch = (
+        PatchResult(
+            action="semantic_spec",
+            spec=prebuilt_spec,
+            is_followup=semantic_followup,
+            patch_ops=["semantic_parser"],
+        )
+        if prebuilt_spec is not None
+        else patch_or_build(question, catalog, state)
+    )
     actions_used += 1
     action_trace.append(patch.action)
 
@@ -245,6 +318,7 @@ def run_turn(
             password=str(c.get("password") or ""),
             database=str(c.get("database") or ""),
             engine=mysql_engine,
+            params=cr.params,
         )
     elif schema_sql:
         outcome = execute_sql_on_seed(cr.sql, schema_sql=schema_sql, seed_sql=seed_sql)
@@ -269,19 +343,7 @@ def run_turn(
     elif outcome.is_success_with_data:
         terminal = "answer"
         action_trace.append("stop_success")
-        first_row = outcome.rows_preview[0]
-        if len(spec.measures) > 1:
-            values = []
-            for i, measure in enumerate(spec.measures):
-                label = measure.business_label or f"value_{i + 1}"
-                if label in first_row:
-                    values.append(f"{label}={first_row[label]}")
-            if not values:
-                values = [f"{k}={v}" for k, v in first_row.items()]
-            answer = "查询结果：" + "，".join(values) + "。" + evidence.answer_footer()
-        else:
-            val = list(first_row.values())[-1]
-            answer = f"查询结果为 {val}。" + evidence.answer_footer()
+        answer = assemble_query_answer(spec, outcome, evidence)
     elif outcome.status == QueryOutcomeStatus.SUCCESS_EMPTY:
         terminal = "stop_empty"
         action_trace.append("stop_empty")

@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.core.database import engine
 from app.core.crypto import encrypt_password, decrypt_password
 from app.core.engine_registry import engine_registry
+from app.services.connection_target_policy import connection_target_allowed
 
 
 def _gen_id() -> str:
@@ -15,6 +16,8 @@ def _gen_id() -> str:
 
 def create_connection(user_id: int, name: str, host: str, port: int,
                       db_user: str, db_password: str, db_name: str) -> dict:
+    if not connection_target_allowed(host):
+        raise ValueError("数据库地址未被部署方允许")
     conn_id = _gen_id()
     encrypted_pw = encrypt_password(db_password)
     with engine.connect() as conn:
@@ -83,22 +86,6 @@ def test_connection(connection_id: str, user_id: int) -> dict:
         return {"ok": False, "error": str(e)}
 
 
-def test_direct_connection(host: str, port: int, db_user: str, db_password: str, db_name: str) -> dict:
-    try:
-        ok = engine_registry.test_connection(host, port, db_user, db_password, db_name)
-        return {"ok": ok}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
-def discover_schema_direct(host: str, port: int, db_user: str, db_password: str, db_name: str) -> dict:
-    try:
-        schema = engine_registry.discover_schema(host, port, db_user, db_password, db_name)
-        return {"ok": True, "schema": schema}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 def delete_connection(connection_id: str, user_id: int) -> bool:
     with engine.connect() as conn:
         result = conn.execute(text(
@@ -110,4 +97,11 @@ def delete_connection(connection_id: str, user_id: int) -> bool:
             "UPDATE db_connections SET status = 'inactive' WHERE id = :id"
         ), {"id": connection_id})
         conn.commit()
+    # A deleted credential must not remain usable through a pooled legacy engine.
+    with engine.connect() as conn:
+        space_rows = conn.execute(text(
+            "SELECT id FROM analysis_spaces WHERE connection_id = :id"
+        ), {"id": connection_id}).fetchall()
+    for row in space_rows:
+        engine_registry.invalidate(str(row[0]))
     return True

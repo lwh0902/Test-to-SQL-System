@@ -293,14 +293,6 @@ export interface Connection {
   created_at: string;
 }
 
-export interface TestDirectRequest {
-  host: string;
-  port: number;
-  db_user: string;
-  db_password: string;
-  db_name: string;
-}
-
 export async function listConnections(): Promise<{ connections: Connection[] }> {
   const res = await fetchWithAuth(`${API_BASE}/connections`);
   if (!res.ok) return { connections: [] };
@@ -323,22 +315,9 @@ export async function createConnection(req: {
   return res.json();
 }
 
-export async function testDirectConnection(req: TestDirectRequest): Promise<{ ok: boolean; error?: string }> {
-  const res = await fetchWithAuth(`${API_BASE}/connections/test-direct`, {
+export async function testSavedConnection(connectionId: string): Promise<{ ok: boolean; code?: string; message?: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/connections/${encodeURIComponent(connectionId)}/test`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
-  });
-  return res.json();
-}
-
-export async function discoverSchemaDirect(req: TestDirectRequest): Promise<{
-  ok: boolean; schema?: Record<string, { comment: string; columns: { name: string; type: string }[] }>; error?: string;
-}> {
-  const res = await fetchWithAuth(`${API_BASE}/connections/discover-schema`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
   });
   return res.json();
 }

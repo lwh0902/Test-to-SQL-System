@@ -1556,6 +1556,7 @@ def run_analysis(
                 database=str(conn.get("database") or conn.get("db_name") or ""),
                 trace_id=trace_id,
                 engine=mysql_engine,
+                params=cr.params,
             )
         elif schema_sql:
             outcome = execute_sql_on_seed(cr.sql, schema_sql=schema_sql, seed_sql=seed_sql)

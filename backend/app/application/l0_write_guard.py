@@ -31,8 +31,9 @@ _CN_WRITE_PATTERNS = (
     re.compile(r"清空\s*(?:一下\s*)?(表|数据|库|全部|所有)"),
     re.compile(r"(?:请)?(?:帮我)?(?:写入|插入)\s*(?:一下)?\s*(数据|记录|一行|一条|到表)"),
     re.compile(r"改表|修改表结构|删库|删表"),
-    # 改成 / 改成0 / 全部改成 — common Chinese update intent
-    re.compile(r"(?:请)?(?:帮我)?(?:把|将)?.{0,40}?(?:全改成|全部改成|都改成|改成|改成0|改为|更新为|设置成)"),
+    # Only treat “改成” as a mutation when its target is clearly persisted data.
+    # “改成按月趋势 / 改成按品类拆开” are safe query follow-ups.
+    re.compile(r"(?:请)?(?:帮我)?(?:把|将).{0,40}?(?:字段|列|数据|记录|金额|状态|值).{0,24}?(?:全改成|全部改成|都改成|改成|改为|更新为|设置成)"),
     re.compile(r"(?:请)?(?:帮我)?(?:更新|修改).{0,24}?(表|字段|列|数据|记录|金额|amount)"),
     re.compile(r"DROP\s+TABLE", re.I),
     re.compile(r"TRUNCATE\s+TABLE", re.I),

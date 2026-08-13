@@ -23,6 +23,12 @@ def require_space_access(space_id: str, user_id: int) -> dict:
     return space
 
 
+def require_admin(user: dict) -> None:
+    """Guard actions that change platform-managed public data sources."""
+    if str((user or {}).get("role") or "").lower() != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+
+
 def session_belongs_to_user_and_space(session_id: str, user_id: int, space_id: str) -> bool:
     with engine.connect() as conn:
         return conn.execute(text(

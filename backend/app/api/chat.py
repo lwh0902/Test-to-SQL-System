@@ -231,9 +231,3 @@ async def chat(request: Request, req: ChatRequest, user: dict = Depends(get_curr
     result = await service.handle_turn(turn_req)
     public = result.to_public_dict()
     return _to_chat_response(public)
-
-
-# Re-export for tests that still patch get_graph at chat module level
-def get_graph():
-    from app.services.agent import get_graph as _gg
-    return _gg()

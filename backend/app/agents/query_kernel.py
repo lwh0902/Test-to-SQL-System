@@ -59,13 +59,18 @@ def _load_catalog(space_id: str, catalog: SemanticCatalog | None = None) -> Sema
         return None
 
 
-def _resolve_connection(space_id: str, mysql_connection: dict | None = None) -> dict | None:
+def _resolve_connection(
+    space_id: str,
+    *,
+    user_id: int,
+    mysql_connection: dict | None = None,
+) -> dict | None:
     if mysql_connection and mysql_connection.get("database"):
         return mysql_connection
     try:
-        from app.application.connection_registry import get_space_connection
+        from app.services.authorized_connection_service import resolve_authorized_connection
 
-        conn = get_space_connection(space_id)
+        conn = resolve_authorized_connection(user_id=user_id, space_id=space_id)
         if conn and conn.get("database"):
             return conn
     except Exception:
@@ -108,7 +113,11 @@ def run_query_kernel(
             action="refuse",
         )
 
-    conn = _resolve_connection(space_id, mysql_connection) if execute else None
+    conn = _resolve_connection(
+        space_id,
+        user_id=user_id,
+        mysql_connection=mysql_connection,
+    ) if execute else None
     result = run_analysis(
         q,
         cat,

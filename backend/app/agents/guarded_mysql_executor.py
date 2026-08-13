@@ -18,6 +18,10 @@ _WRITE = re.compile(
 )
 _MULTI = re.compile(r";\s*\S")
 _UNION = re.compile(r"(?is)\bunion\b")
+_DANGEROUS = re.compile(
+    r"(?is)\b(LOAD_FILE|BENCHMARK|SLEEP|GET_LOCK|RELEASE_LOCK)\s*\(|"
+    r"\bINTO\s+(OUTFILE|DUMPFILE)\b"
+)
 
 
 class GuardedMySQLExecutor:
@@ -61,7 +65,13 @@ class GuardedMySQLExecutor:
         if self._own and self._engine is not None:
             self._engine.dispose()
 
-    def execute(self, sql: str, *, trace_id: str | None = None) -> QueryOutcome:
+    def execute(
+        self,
+        sql: str,
+        *,
+        params: dict[str, Any] | None = None,
+        trace_id: str | None = None,
+    ) -> QueryOutcome:
         t0 = time.perf_counter()
         raw = (sql or "").strip().rstrip(";")
         if not raw:
@@ -81,6 +91,12 @@ class GuardedMySQLExecutor:
         if _UNION.search(raw):
             return QueryOutcome.sql_rejected(
                 message="禁止 UNION",
+                sql=raw[:500],
+                trace_id=trace_id,
+            )
+        if _DANGEROUS.search(raw):
+            return QueryOutcome.sql_rejected(
+                message="禁止危险 SQL 函数或文件操作",
                 sql=raw[:500],
                 trace_id=trace_id,
             )
@@ -112,7 +128,8 @@ class GuardedMySQLExecutor:
                     conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
                 except Exception:
                     pass
-                result = conn.execute(text(raw))
+                conn.execute(text("SET SESSION MAX_EXECUTION_TIME = :timeout_ms"), {"timeout_ms": 30_000})
+                result = conn.execute(text(raw), params or {})
                 cols = list(result.keys()) if result.returns_rows else []
                 rows = []
                 if result.returns_rows:
@@ -181,6 +198,7 @@ def execute_sql_mysql(
     max_rows: int = 100,
     trace_id: str | None = None,
     engine: Engine | None = None,
+    params: dict[str, Any] | None = None,
 ) -> QueryOutcome:
     ex = GuardedMySQLExecutor(
         host=host,
@@ -192,7 +210,7 @@ def execute_sql_mysql(
         engine=engine,
     )
     try:
-        return ex.execute(sql, trace_id=trace_id)
+        return ex.execute(sql, params=params, trace_id=trace_id)
     finally:
         if engine is None:
             ex.close()

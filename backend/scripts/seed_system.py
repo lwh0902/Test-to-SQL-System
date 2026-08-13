@@ -69,6 +69,14 @@ def seed_spaces():
             "dataset_id": "ecommerce",
             "sort_order": 2,
         },
+        {
+            "id": "travel_b2b",
+            "name": "B2B出行分销",
+            "description": "用车/酒店/门票订单、渠道供应商、GMV与取消率等出行分销指标",
+            "icon": "compass",
+            "dataset_id": "travel_b2b",
+            "sort_order": 3,
+        },
     ]
 
     with engine.connect() as conn:
@@ -89,6 +97,7 @@ def seed_metrics():
     seed_files = {
         "tech_quality": os.path.join(base, "config", "metrics.yml"),
         "ecommerce": os.path.join(seeds_dir, "ecommerce.yml"),
+        "travel_b2b": os.path.join(seeds_dir, "travel_b2b.yml"),
     }
 
     total = 0

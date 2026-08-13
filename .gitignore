@@ -37,3 +37,8 @@ dist/
 
 # Multi-agent export files
 backend/data/exports/
+
+# Local evaluation runtime state (generated, never source-controlled)
+eval/analysis_state_store/
+eval/diagnosis_summary_store/
+eval/pending_query_store/

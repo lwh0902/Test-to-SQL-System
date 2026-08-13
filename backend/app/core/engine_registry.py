@@ -1,6 +1,7 @@
 """引擎注册表 - 按空间管理数据库连接，惰性创建同步 SQLAlchemy Engine"""
 
 import threading
+from urllib.parse import quote_plus
 
 from sqlalchemy import create_engine, text
 
@@ -26,7 +27,10 @@ class EngineRegistry:
 
         host, port, db_user, db_password_encrypted, db_name = conn_info
         password = decrypt_password(db_password_encrypted)
-        url = f"mysql+pymysql://{db_user}:{password}@{host}:{port}/{db_name}?charset=utf8mb4"
+        url = (
+            f"mysql+pymysql://{quote_plus(str(db_user))}:{quote_plus(str(password))}"
+            f"@{host}:{port}/{db_name}?charset=utf8mb4"
+        )
 
         eng = create_engine(url, pool_pre_ping=True, pool_recycle=3600, pool_size=5, max_overflow=10)
         with self._lock:
@@ -39,7 +43,8 @@ class EngineRegistry:
                 "SELECT dc.host, dc.port, dc.db_user, dc.db_password_encrypted, dc.db_name "
                 "FROM analysis_spaces sp "
                 "JOIN db_connections dc ON sp.connection_id = dc.id "
-                "WHERE sp.id = :space_id AND dc.status = 'active'"
+                "WHERE sp.id = :space_id AND sp.user_id IS NOT NULL "
+                "AND dc.user_id = sp.user_id AND dc.status = 'active'"
             ), {"space_id": space_id})
             return result.fetchone()
 

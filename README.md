@@ -1,27 +1,27 @@
 # DataPilot
 
-**Version V1.5**
+**面向企业业务团队的可信自然语言数据分析工作台**
 
-自然语言驱动的只读数据分析工作台。面向业务与运营同学：用中文提问即可完成库表理解、指标查询、结果可视化与可选深度诊断，无需手写 SQL。
+DataPilot 让业务、运营和产品人员直接用自然语言理解数据、追问指标、拆解趋势和定位异常；同时把“能回答”建立在可控语义、可验证 SQL 和严格数据源权限之上。它不是把问题直接交给模型写 SQL，而是一条可审计、可回归、可上线的分析链路。
 
 ---
 
-## 产品定位
+## 为什么选择 DataPilot
 
-| 能力 | 说明 |
+| 优势 | 价值 |
 |------|------|
-| 对话式查数 | 指标、趋势、拆维、筛选、相对时间（如「最近七天」） |
-| 业务数据地图 | 基于 Catalog 的表职责导览，中文标题 + 用途说明 |
-| 会话与空间 | 多空间（Space）隔离；会话消息持久化 |
-| 只读安全 | L0 写意图拒绝、SQL AST 校验、查询结果结构化 Outcome |
-| 深度诊断 | 显式请求时触发；依赖有效查数结果，不做空报告 |
-| 流式体验 | JSON / SSE 双通道，前端玻璃拟态工作台 |
+| **业务语义接地** | 以 Catalog、业务语义模型和实体字典约束模型理解，降低“看似合理、实际查错”的风险。 |
+| **端到端可控** | 自然语言 → 结构化 AnalysisSpec → 参数化 SQL → 只读执行 → 结果解释；每一段都有明确输入输出。 |
+| **可信追问体验** | 支持趋势、拆维、筛选、实体名纠正和缺失时间确认，不用要求业务人员懂数据库。 |
+| **生产级数据源边界** | 公共空间可查不可改；私有空间、会话和数据库连接均按用户所有权实时校验。 |
+| **默认安全执行** | 模型不直接执行 SQL；只允许编译器生成的单条只读查询，绑定参数、超时和危险能力拦截全程生效。 |
+| **可观测与可回归** | JSON/SSE 同一业务主链，统一 QueryOutcome、Trace 与自动化测试，便于持续评测准确率。 |
 
-> 本版本为 **V1.5 专业内测基线**。生产级多日试点与完整验收仍按内部规范推进，请勿将本仓库表述为已正式上线交付。
+> 当前版本为专业内测主线。仓库内置完整安全边界和自动化回归，但真实生产上线仍应完成数据库迁移、只读账号授予、网络出站白名单和部署环境验收。
 
 ---
 
-## 架构（V1.5）
+## 核心架构
 
 ```
 客户端 (React)
@@ -32,11 +32,11 @@ FastAPI 传输层（鉴权 · 限流 · 路由适配）
     ▼
 AnalysisApplicationService          ← 唯一业务入口
     │
-    ├─ L0 写保护 / 数据面预检 / Catalog
-    ├─ Supervisor（L1 Flash 主路径，L2 规则回退）
+    ├─ 空间授权 / 连接解析 / Catalog
+    ├─ Supervisor（功能策略 + LLM 语义理解）
     └─ Dispatch（Hub-and-Spoke，禁止 Agent 互调）
            │
-           ├─ Query Kernel      AnalysisSpec → SQL Compiler → Guarded MySQL
+           ├─ Query Kernel      AnalysisSpec → 参数化 SQL → Guarded MySQL
            ├─ Schema Inventory  Catalog 驱动业务导览 / data_map
            ├─ Diagnosis         Insight → Report → Review（A2A）
            └─ Chat / Help / Clarify / Summary Cite
@@ -48,6 +48,7 @@ AnalysisApplicationService          ← 唯一业务入口
 - **最小唤醒**：普通查数不启动诊断 / 报告链路
 - **QueryOutcome 为事实**：错误不伪装成「0 行」；无有效数据不出报告
 - **Catalog 接地**：规划与过滤以真实库表与字段语义为准
+- **Fail Closed**：私有空间没有有效、归属匹配的数据源时拒绝执行，不走缓存或默认连接兜底
 
 ---
 
@@ -59,7 +60,7 @@ AnalysisApplicationService          ← 唯一业务入口
 | 分析内核 | AnalysisSpec · SemanticCatalog · QueryHarness · Supervisor |
 | 编排 / 诊断 | A2A Dispatcher · 受控 Procedure（非自由 ReAct） |
 | LLM | Anthropic 兼容 API（默认 DeepSeek；可配置） |
-| SQL 安全 | sqlglot AST · 只读策略 · 行预览上限 |
+| SQL 安全 | AnalysisSpec 编译 · 参数绑定 · sqlglot AST · 只读策略 · 数据库侧超时 |
 | 前端 | React 19 · TypeScript · Vite · Ant Design · ECharts |
 | 存储 | MySQL（系统库 + 业务只读源） |
 
@@ -105,6 +106,8 @@ mysql -u root -p < config/init_system_tables.sql
 # 如有增量迁移
 mysql -u root -p datacheck < config/migrations/005_agent_runtime.sql
 mysql -u root -p datacheck < config/migrations/006_a2a_lease.sql
+mysql -u root -p datacheck < config/migrations/007_semantic_models.sql
+mysql -u root -p datacheck < config/migrations/008_managed_space_connections.sql
 ```
 
 ### 3. 后端
@@ -146,9 +149,9 @@ npm run dev -- --host 127.0.0.1 --port 5173
 | `JWT_SECRET` | 是 | 访问令牌签名 |
 | `DB_ENCRYPTION_KEY` | 是 | AES-256-GCM，Base64 的 32 字节密钥 |
 | `DATAPILOT_SUPERVISOR_L1` | 否 | 默认开启 L1；`0` 关闭 |
-| `DATAPILOT_AUTO_MOCK` | 否 | 启动时自动挂载演示空间（默认开） |
+| `DATAPILOT_DB_ALLOWED_HOSTS` | 生产必填 | 私有 MySQL 可连接的精确域名或 CIDR 白名单，例如 `db.company.internal,10.20.0.0/16` |
 
-**安全约定**：仓库只包含 `.env.example`；真实 `.env`、密钥、连接串不得入库。
+**安全约定**：仓库只包含 `.env.example`；真实 `.env`、密钥、连接串不得入库。业务数据源必须使用最小权限的只读账号。
 
 ---
 
@@ -157,9 +160,10 @@ npm run dev -- --host 127.0.0.1 --port 5173
 ### 查询主链
 
 1. 用户提问进入 `AnalysisApplicationService`
-2. Supervisor 判定意图（查数 / 追问 / 库表理解 / 诊断等）
-3. 查询路径：`AnalysisSpec` 规划 → 编译 SQL → 守卫执行 → 答案装配
-4. 支持相对时间（最近 N 天 / 一周 / 本月等）与空间本地示例引导
+2. Supervisor 判定功能意图（查数 / 追问 / 库表理解 / 诊断等）
+3. 语义解析将问题落为受约束的 `AnalysisSpec`，缺少必要时间范围时主动确认
+4. 查询路径：受权数据源 → 参数化 SQL 编译 → 守卫执行 → 结果解释
+5. 支持相对时间、趋势、拆维、实体名称精确匹配与空间本地示例引导
 
 ### 库表导览
 
@@ -171,6 +175,13 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 - 消息按 `user_id × space_id × session_id` 隔离写入
 - 刷新后可恢复历史问答与关键元数据
+
+### 数据源与权限
+
+- **公共空间**：所有已登录用户可查询；只有管理员可以变更连接或重新建档。
+- **私有空间**：空间、会话与关联连接必须属于同一用户；每次运行再次核验。
+- **连接防护**：不提供任意主机/端口探测接口；私有数据源必须命中部署方出站白名单。
+- **执行防护**：拒绝写操作、多语句、文件读写、锁与延迟函数；查询参数不拼接进 SQL，并设置数据库侧执行上限。
 
 ### 深度诊断
 
@@ -189,6 +200,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 | GET | `/api/sessions/{id}` | 会话与消息 |
 | POST | `/api/chat` | 对话（JSON） |
 | POST | `/api/chat/stream` | 对话（SSE） |
+| GET/POST | `/api/connections` | 私有数据源连接管理（所有者范围） |
 | GET | `/api/health` | 健康检查 |
 
 鉴权：`Authorization: Bearer <access_token>`
@@ -198,9 +210,9 @@ npm run dev -- --host 127.0.0.1 --port 5173
 ## 开发约定
 
 - 业务逻辑放在 `application/` 与 `agents/`，路由层只做传输适配
-- 新增能力不得绕过 Supervisor 主链（禁止平行关键字路由器）
+- 新增能力不得绕过 Supervisor 主链或运行期空间授权
 - 查询类能力默认不唤醒诊断 Agent
-- 提交前确认：无 `.env`、无密钥、无本地导出物
+- 提交前确认：无 `.env`、无密钥、无本地 mock、无测评产物和本地导出物
 
 ---
 
@@ -208,7 +220,7 @@ npm run dev -- --host 127.0.0.1 --port 5173
 
 | 版本 | 说明 |
 |------|------|
-| **V1.5** | 分析内核主链、Catalog 业务导览、相对时间、会话隔离持久化、空间本地引导、诊断受控链路 |
+| **专业内测主线** | 语义查询主链、LLM Supervisor、时间确认、实体字典、统一 JSON/SSE、私有数据源所有权校验、参数化只读 SQL 执行 |
 
 ---
 

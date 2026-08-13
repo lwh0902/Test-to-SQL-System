@@ -26,15 +26,24 @@ def _qident(name: str) -> str:
     return f"`{n}`"
 
 
-def _filter_condition_sql(filter_expr: Any, default_table: str) -> str:
+def _filter_condition_sql(
+    filter_expr: Any,
+    default_table: str,
+    params: dict[str, Any],
+    prefix: str,
+) -> str:
     table = filter_expr.table or default_table
     op = filter_expr.op or "="
     value = filter_expr.value
-    if isinstance(value, str):
-        literal = "'" + value.replace("'", "''") + "'"
-    else:
-        literal = str(value)
-    return f"{_qident(table)}.{_qident(filter_expr.field)} {op} {literal}"
+    if op.lower() == "in" and isinstance(value, (list, tuple, set)):
+        names = []
+        for index, item in enumerate(value):
+            name = f"{prefix}_{index + 1}"
+            params[name] = item
+            names.append(f":{name}")
+        return f"{_qident(table)}.{_qident(filter_expr.field)} IN ({', '.join(names)})"
+    params[prefix] = value
+    return f"{_qident(table)}.{_qident(filter_expr.field)} {op} :{prefix}"
 
 
 def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
@@ -124,6 +133,7 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
         )
 
     select_parts = []
+    params: dict[str, Any] = {}
     rate_filters = list(spec.filters or [])
     consumed_global_filter_indexes: set[int] = set()
     multiple_measures = len(spec.measures) > 1
@@ -158,7 +168,7 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
         alias_sql = _qident(alias_name) if multiple_measures else "value"
         if agg == "COUNT":
             if m.filter is not None:
-                cond = _filter_condition_sql(m.filter, table)
+                cond = _filter_condition_sql(m.filter, table, params, f"measure_filter_{measure_index + 1}")
                 select_parts.append(f"SUM(CASE WHEN {cond} THEN 1 ELSE 0 END) AS {alias_sql}")
             else:
                 select_parts.append(f"COUNT(*) AS {alias_sql}")
@@ -169,7 +179,7 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
                 rate_filter = rate_filters[0]
                 consumed_global_filter_indexes.add(0)
             if rate_filter is not None:
-                cond = _filter_condition_sql(rate_filter, table)
+                cond = _filter_condition_sql(rate_filter, table, params, f"rate_filter_{measure_index + 1}")
                 select_parts.append(
                     f"(SUM(CASE WHEN {cond} THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*),0)) AS {alias_sql}"
                 )
@@ -186,8 +196,19 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
     ]
     # dimensions (not for sample/row preview)
     group_cols = []
+    time_group_by_field: dict[str, str] = {}
     if not is_sample:
         for d in spec.dimensions or []:
+            if d.startswith("time:"):
+                _, grain, field = (d.split(":", 2) + ["", ""])[:3]
+                tname = next((name for name in tables if field in {c.name for c in catalog.table_map[name].columns}), base)
+                formats = {"day": "%Y-%m-%d", "week": "%x-W%v", "month": "%Y-%m", "quarter": "%Y-Q%q", "year": "%Y"}
+                fmt = formats.get(grain)
+                if fmt:
+                    time_group_expr = f"DATE_FORMAT({_qident(tname)}.{_qident(field)}, '{fmt}')"
+                    group_cols.append(time_group_expr)
+                    time_group_by_field[field] = time_group_expr
+                continue
             # dimension may be table.field or field
             if "." in d:
                 t, c = d.split(".", 1)
@@ -205,7 +226,6 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
         select_parts = group_cols + select_parts
 
     where = []
-    params: dict[str, Any] = {}
     if spec.time_range and spec.time_range.field:
         tr = spec.time_range
         tfield = tr.field
@@ -216,8 +236,11 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
                 t_table = tname
                 break
         where.append(
-            f"{_qident(t_table)}.{_qident(tfield)} >= '{tr.start}' AND {_qident(t_table)}.{_qident(tfield)} <= '{tr.end} 23:59:59'"
+            f"{_qident(t_table)}.{_qident(tfield)} >= :time_start "
+            f"AND {_qident(t_table)}.{_qident(tfield)} <= :time_end"
         )
+        params["time_start"] = tr.start
+        params["time_end"] = f"{tr.end} 23:59:59"
     for i, f in enumerate(spec_filters_for_where):
         ft = f.table or base
         for tname in tables:
@@ -228,11 +251,17 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
         if op not in {"=", "!=", ">", "<", ">=", "<=", "LIKE", "in"}:
             return CompileResult(ok=False, errors=[f"bad_op:{op}"])
         lit = f.value
-        if isinstance(lit, str):
-            lit_s = lit.replace("'", "''")
-            where.append(f"{_qident(ft)}.{_qident(f.field)} {op} '{lit_s}'")
+        if op.lower() == "in" and isinstance(lit, (list, tuple, set)):
+            names = []
+            for value_index, value in enumerate(lit):
+                name = f"filter_{i + 1}_{value_index + 1}"
+                params[name] = value
+                names.append(f":{name}")
+            where.append(f"{_qident(ft)}.{_qident(f.field)} IN ({', '.join(names)})")
         else:
-            where.append(f"{_qident(ft)}.{_qident(f.field)} {op} {lit}")
+            name = f"filter_{i + 1}"
+            params[name] = lit
+            where.append(f"{_qident(ft)}.{_qident(f.field)} {op} :{name}")
 
     sql = f"SELECT {', '.join(select_parts)} FROM {_qident(base)}{join_sql}"
     if where:
@@ -244,8 +273,11 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
         ord_parts = []
         for o in spec.ordering:
             col = o.get("field", "value")
-            direction = o.get("direction", "DESC")
-            ord_parts.append(f"{_qident(col) if col != 'value' else 'value'} {direction}")
+            direction = "ASC" if str(o.get("direction", "DESC")).upper() == "ASC" else "DESC"
+            order_expr = time_group_by_field.get(col)
+            if order_expr is None:
+                order_expr = _qident(col) if col != "value" else "value"
+            ord_parts.append(f"{order_expr} {direction}")
         if ord_parts:
             sql += " ORDER BY " + ", ".join(ord_parts)
     # FreeformSQLGuard / product preview hard cap ≤ 500 (dev_spec rows preview)

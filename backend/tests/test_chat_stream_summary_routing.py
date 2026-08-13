@@ -1,4 +1,4 @@
-from app.api.chat import _should_generate_analysis_answer
+from app.application.analysis_service import _should_generate_analysis_answer
 
 
 def test_chat_and_help_skip_analysis_summary_pass():

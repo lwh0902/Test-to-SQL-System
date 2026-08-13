@@ -34,7 +34,9 @@ from app.agents.controlled_loop import run_turn as run_controlled_turn
 from app.agents.diagnosis_summary_repository import get_diagnosis_summary_repository
 from app.agents.semantic_catalog import ReadinessStatus, analysis_allowed
 from app.agents.supervisor_decision import SupervisorDecision, decide as supervisor_decide
-from app.application.connection_registry import get_space_connection
+from app.agents.semantic_parser import SemanticParser
+from app.agents.semantic_spec_builder import build_analysis_spec
+from app.services.semantic_model_service import get_semantic_model_service
 from app.pilot.flags import PilotFlags, default_flags
 from app.services.agent import AgentState, get_graph
 
@@ -295,6 +297,7 @@ class AnalysisApplicationService:
         skip_data_plane_precheck: bool = False,
         catalog_repo: Any = None,
         state_repo: Any = None,
+        pending_query_repo: Any = None,
         diagnosis_repo: Any = None,
         diagnosis_agent_call: Any = None,
     ) -> None:
@@ -308,6 +311,7 @@ class AnalysisApplicationService:
         self.skip_data_plane_precheck = skip_data_plane_precheck
         self._catalog_repo = catalog_repo
         self._state_repo = state_repo
+        self._pending_query_repo = pending_query_repo
         self._diagnosis_repo = diagnosis_repo
         # None → production dispatcher_agent_call (R5.5b). Tests may inject component_only.
         self._diagnosis_agent_call = diagnosis_agent_call
@@ -320,6 +324,13 @@ class AnalysisApplicationService:
 
     def _state_repo_or_default(self):
         return self._state_repo if self._state_repo is not None else get_analysis_state_repository()
+
+    def _pending_query_repo_or_default(self):
+        if self._pending_query_repo is not None:
+            return self._pending_query_repo
+        from app.agents.pending_query_repository import get_pending_query_repository
+
+        return get_pending_query_repository()
 
     def _diagnosis_repo_or_default(self):
         return (
@@ -652,12 +663,22 @@ class AnalysisApplicationService:
         recent = None
         try:
             if req.session_id:
+                from app.services.persistence import load_recent_messages
+
+                recent = load_recent_messages(
+                    req.session_id, limit=4, user_id=req.user_id, space_id=req.space_id
+                )
                 st = self._state_repo_or_default().load(req.session_id, req.user_id, req.space_id)
                 if st is not None:
                     wm = {
                         "last_result_status": "success" if st.last_result_preview else "no_data",
                         "last_route": "data_query",
                         "last_target": st.active_subject,
+                        "last_spec": {
+                            "subject": st.active_subject,
+                            "measures": list(st.measures or [])[:3],
+                            "dimensions": list(st.dimensions or [])[:4],
+                        },
                     }
         except Exception:
             wm = None
@@ -668,6 +689,126 @@ class AnalysisApplicationService:
             space_id=req.space_id,
             skip_l1=skip_l1,
         )
+
+    def _pending_time_result(
+        self,
+        req: TurnRequest,
+        message: str,
+        *,
+        decision: SupervisorDecision | None = None,
+        start: str = "",
+        end: str = "",
+        reason: str = "",
+    ) -> TurnResult:
+        tr = TurnResult(
+            response_type="clarification",
+            message=message,
+            answer=message,
+            terminal_status="INVALID_REQUEST",
+            stop_reason="pending_time_confirmation",
+            kernel_route=self.kernel_route,
+            sql="",
+            rows=[],
+            rows_count=0,
+            clarify_slots=["time_confirmation"],
+            evidence={
+                "pending_time_confirmation": True,
+                "candidate_time_range": {"start": start, "end": end},
+                "reason": reason,
+            },
+            next_actions=[
+                {"id": "confirm_time", "label": "确定"},
+                {"id": "replace_time", "label": "修改时间"},
+            ],
+        )
+        return self._attach_supervisor(tr, decision) if decision else tr
+
+    def _pause_for_time_confirmation(
+        self, req: TurnRequest, decision: SupervisorDecision
+    ) -> TurnResult | None:
+        if decision.intent not in {"data_query", "follow_up"} or not req.session_id:
+            return None
+        from app.agents.pending_query_repository import PendingTimeConfirmation
+        from app.agents.time_confirmation import detect_time_confirmation
+
+        candidate = detect_time_confirmation(req.question)
+        if candidate is None:
+            return None
+        semantic_version = ""
+        try:
+            cat = self._catalog_repo_or_default().load(req.space_id)
+            if cat is not None:
+                semantic_version = get_semantic_model_service().load_or_build(
+                    req.space_id, cat
+                ).version
+        except Exception:
+            pass
+        self._pending_query_repo_or_default().save(
+            req.session_id,
+            req.user_id,
+            req.space_id,
+            PendingTimeConfirmation(
+                original_question=req.question,
+                start=candidate.start,
+                end=candidate.end,
+                reason=candidate.reason,
+                prompt=candidate.prompt,
+                semantic_model_version=semantic_version,
+            ),
+        )
+        return self._pending_time_result(
+            req,
+            candidate.prompt,
+            decision=decision,
+            start=candidate.start,
+            end=candidate.end,
+            reason=candidate.reason,
+        )
+
+    def _resolve_pending_time(self, req: TurnRequest) -> tuple[str, TurnResult | None]:
+        """Return an explicit resumed question, a response, or an empty string.
+
+        Confirmed work remains pending until the resumed query actually succeeds.
+        This makes a transient model/provider failure safely retryable.
+        """
+        if not req.session_id:
+            return "", None
+        repo = self._pending_query_repo_or_default()
+        pending = repo.load(req.session_id, req.user_id, req.space_id)
+        if pending is None:
+            return "", None
+        from app.agents.pending_query_repository import PendingTimeConfirmation
+        from app.agents.time_confirmation import classify_confirmation_reply
+
+        reply = classify_confirmation_reply(req.question)
+        if reply.action == "new_query":
+            repo.delete(req.session_id, req.user_id, req.space_id)
+            return "", None
+        if reply.action == "reject":
+            return "", self._pending_time_result(
+                req,
+                "好的，请提供时间，例如“2026年7月”或“最近30天”。",
+                start=pending.start,
+                end=pending.end,
+                reason=pending.reason,
+            )
+        start = reply.start if reply.action == "replace" else pending.start
+        end = reply.end if reply.action == "replace" else pending.end
+        if reply.action == "replace":
+            repo.save(
+                req.session_id,
+                req.user_id,
+                req.space_id,
+                PendingTimeConfirmation(
+                    original_question=pending.original_question,
+                    start=start,
+                    end=end,
+                    reason=pending.reason,
+                    prompt=pending.prompt,
+                    semantic_model_version=pending.semantic_model_version,
+                ),
+            )
+        return f"{pending.original_question}，时间范围为{start}至{end}", None
 
     def _catalog_not_ready_result(self, req: TurnRequest, decision: SupervisorDecision | None = None) -> TurnResult:
         space = req.space_id or "当前空间"
@@ -928,7 +1069,9 @@ class AnalysisApplicationService:
             orig_q = req.question
             try:
                 req.question = resolved
-                tr = self._run_v2_analysis(req, cat)
+                tr = self._run_v2_analysis(
+                    req, cat, decision=decision, original_question=orig_q
+                )
             finally:
                 req.question = orig_q
             return self._attach_supervisor(tr, decision)
@@ -985,8 +1128,26 @@ class AnalysisApplicationService:
 
         # R5.5a: single SupervisorDecision control plane on v2
         if self.kernel_route == KERNEL_V2:
-            decision = self._run_supervisor(req)
-            tr = await self._dispatch_v2(req, cat, decision)
+            resumed_question, pending_response = self._resolve_pending_time(req)
+            if pending_response is not None:
+                self._persist_turn(req, pending_response)
+                return pending_response
+            original_reply = req.question
+            if resumed_question:
+                req.question = resumed_question
+            try:
+                decision = self._run_supervisor(req)
+                paused = self._pause_for_time_confirmation(req, decision)
+                tr = paused if paused is not None else await self._dispatch_v2(req, cat, decision)
+            finally:
+                req.question = original_reply
+            if resumed_question and tr.terminal_status in {
+                QueryOutcomeStatus.SUCCESS_WITH_DATA.value,
+                QueryOutcomeStatus.SUCCESS_EMPTY.value,
+            }:
+                self._pending_query_repo_or_default().delete(
+                    req.session_id, req.user_id, req.space_id
+                )
             self._persist_turn(req, tr)
             return tr
 
@@ -1023,17 +1184,36 @@ class AnalysisApplicationService:
         self._persist_turn(req, tr)
         return tr
 
-    def _run_v2_analysis(self, req: TurnRequest, cat) -> TurnResult:
+    def _run_v2_analysis(
+        self,
+        req: TurnRequest,
+        cat,
+        *,
+        decision: SupervisorDecision | None = None,
+        original_question: str | None = None,
+    ) -> TurnResult:
         """R3+R4: controlled loop with ActiveAnalysisState load/save + live MySQL."""
-        conn = get_space_connection(req.space_id)
-        if not conn and cat.identity:
-            conn = {
-                "host": cat.identity.get("host") or "127.0.0.1",
-                "port": cat.identity.get("port") or 3306,
-                "user": cat.identity.get("user") or "root",
-                "password": "",
-                "database": cat.identity.get("database") or "",
-            }
+        try:
+            from app.services.authorized_connection_service import (
+                ConnectionUnavailable,
+                resolve_authorized_connection,
+            )
+
+            conn = resolve_authorized_connection(
+                user_id=req.user_id,
+                space_id=req.space_id,
+            )
+        except ConnectionUnavailable:
+            return TurnResult(
+                response_type="error",
+                message="当前空间的数据源不可用或无权访问。",
+                answer="当前空间的数据源不可用或无权访问。",
+                terminal_status=QueryOutcomeStatus.PERMISSION_DENIED.value,
+                stop_reason="data_source_unavailable",
+                kernel_route=self.kernel_route,
+                rows=[],
+                rows_count=0,
+            )
 
         state_repo = self._state_repo_or_default()
         prior = None
@@ -1070,6 +1250,111 @@ class AnalysisApplicationService:
                     except Exception:
                         pass
 
+        semantic_model = get_semantic_model_service().load_or_build(req.space_id, cat)
+        prior_spec = prior.to_spec(original_question=req.question).to_dict() if prior else None
+        parsed = SemanticParser().parse(
+            req.question,
+            semantic_model,
+            previous_spec=prior_spec,
+            supervisor_params=(decision.task_spec.params if decision else None),
+            original_question=original_question,
+        )
+        if not parsed.ok or parsed.query is None:
+            tr = self._enrich_clarification(
+                req,
+                "我还不能把这个问题可靠地映射到当前空间已定义的业务指标。请补充指标、对象或时间范围。",
+                slots=["metric"],
+                stop_reason="semantic_parse",
+            )
+            tr.evidence = {
+                **(tr.evidence if isinstance(tr.evidence, dict) else {}),
+                "semantic_parser_error": parsed.error,
+                "semantic_model_version": semantic_model.version,
+            }
+            return tr
+        if parsed.query.operation == "clarify" or parsed.query.unresolved_slots:
+            return self._enrich_clarification(
+                req,
+                "还需要补充信息才能准确查询。",
+                slots=list(parsed.query.unresolved_slots or ["metric"]),
+                stop_reason="semantic_clarify",
+            )
+        try:
+            semantic_spec = build_analysis_spec(
+                parsed.query, semantic_model, cat, original_question=req.question
+            )
+        except ValueError:
+            return self._enrich_clarification(
+                req,
+                "这个问题中的指标或维度还没有在当前空间确认。",
+                slots=["metric"],
+                stop_reason="semantic_validation",
+            )
+
+        # Business-name grounding: auto-sync bounded distinct values (channels,
+        # suppliers, products) into the system DB, then repair a model-shortened
+        # name only if the user's original wording has exactly one full match.
+        try:
+            from app.services.entity_value_service import (
+                load_entity_values,
+                resolve_filter_values,
+                sync_entity_values_if_stale,
+            )
+
+            if conn and conn.get("database"):
+                sync_entity_values_if_stale(
+                    space_id=req.space_id, model=semantic_model, connection=conn
+                )
+            field_by_dimension = {d.id: d.field for d in semantic_model.dimensions}
+            values = load_entity_values(
+                req.space_id, field_by_dimension.keys(), field_by_dimension=field_by_dimension
+            )
+            resolution = resolve_filter_values(
+                semantic_spec.filters, original_question or req.question, values
+            )
+            if resolution.ambiguities:
+                return self._enrich_clarification(
+                    req,
+                    "找到了多个可能的业务名称，请补充更完整的渠道、供应商或产品名称。",
+                    slots=["subject"],
+                    stop_reason="entity_ambiguous",
+                )
+            semantic_spec.filters = resolution.filters
+        except Exception:
+            # Dictionary sync is an accuracy enhancement. Its temporary failure must
+            # not block a safe query that already has a complete semantic plan.
+            pass
+
+        # Final semantic guard: a SQL-safe plan is not necessarily an answer to
+        # the user's question.  Reject before compilation if an explicit model
+        # dimension, exact business name, or time range disappeared.
+        try:
+            from app.agents.semantic_coverage import validate_semantic_coverage
+
+            coverage = validate_semantic_coverage(
+                original_question or req.question,
+                semantic_spec,
+                semantic_model,
+                values if "values" in locals() else [],
+            )
+            if not coverage.ok:
+                tr = self._enrich_clarification(
+                    req,
+                    "我识别到的问题条件没有完整进入查询计划，为避免返回错误数据，请换一种说法或稍后重试。",
+                    slots=["query_condition"],
+                    stop_reason="semantic_coverage",
+                )
+                tr.evidence = {
+                    **(tr.evidence if isinstance(tr.evidence, dict) else {}),
+                    "semantic_coverage_errors": coverage.errors,
+                    "semantic_model_version": semantic_model.version,
+                }
+                return tr
+        except Exception:
+            # If the guard itself is unavailable, preserve the established parser
+            # validation path rather than turning a safe request into an outage.
+            pass
+
         loop = run_controlled_turn(
             req.question,
             cat,
@@ -1079,6 +1364,8 @@ class AnalysisApplicationService:
             user_id=req.user_id,
             space_id=req.space_id,
             allow_heavy=False,
+            prebuilt_spec=semantic_spec,
+            semantic_followup=parsed.query.operation == "modify_query",
         )
 
         # Persist state after successful answer / query with state
@@ -1199,6 +1486,9 @@ class AnalysisApplicationService:
             "agents_called": list(loop.agents_called or []),
             "patch_ops": list(loop.patch_ops or []),
             "state_invalidated": state_invalidated,
+            "semantic_model_version": semantic_model.version,
+            "semantic_model_provenance": semantic_model.provenance,
+            "semantic_parser": True,
             "active_state_version": tr.active_state_version,
         }
         if cat.readiness and str(getattr(cat.readiness.status, "value", cat.readiness.status)) == "DEGRADED":
@@ -1477,6 +1767,31 @@ class AnalysisApplicationService:
 
         Does not format SSE text — adapter + SseTerminalGuard do that.
         """
+        # V2 has one product workflow.  JSON and SSE must not independently
+        # implement Supervisor, pending confirmation, dispatch or persistence.
+        # SSE is only a transport adapter around the canonical blocking result.
+        if self.kernel_route == KERNEL_V2:
+            yield "run_started", {
+                "session_id": req.session_id or "",
+                "space_id": req.space_id or "",
+            }
+            tr = await self.handle_turn(req)
+            if isinstance(tr.task_spec, dict) and tr.task_spec.get("task_type") == "diagnosis_playbook":
+                yield "agent_lifecycle", {
+                    "agent": "supervisor",
+                    "status": "completed",
+                    "task_id": tr.task_id or "",
+                    "session_id": req.session_id or "",
+                    "phase": "diagnosis_dispatch",
+                }
+                if tr.stop_reason and tr.stop_reason not in {"stop_ok", ""}:
+                    yield "diagnosis_stopped", {
+                        "stop_reason": tr.stop_reason,
+                        "task_id": tr.task_id or "",
+                    }
+            yield "complete", tr.to_public_dict()
+            return
+
         if detect_write_intent(req.question).refuse:
             tr = _l0_refuse_result(req, kernel_route=self.kernel_route)
             self._persist_turn(req, tr)
@@ -1495,53 +1810,6 @@ class AnalysisApplicationService:
         if blocked is not None:
             self._persist_turn(req, blocked)
             yield "complete", blocked.to_public_dict()
-            return
-
-        if self.kernel_route == KERNEL_V2:
-            decision = self._run_supervisor(req)
-            # Pre-announce diagnosis handoff for SSE observability (R5.5b)
-            if decision.intent == "diagnosis" or decision.task_spec.task_type == "diagnosis_playbook":
-                task_id = f"diag_{req.session_id or 'local'}_{abs(hash(req.question or '')) % 10_000_000}"
-                yield "task_created", {
-                    "task_id": task_id,
-                    "session_id": req.session_id or "",
-                    "user_id": req.user_id,
-                    "space_id": req.space_id or "",
-                    "agent": "supervisor",
-                    "status": "queued",
-                }
-                yield "agent_lifecycle", {
-                    "agent": "supervisor",
-                    "status": "running",
-                    "task_id": task_id,
-                    "session_id": req.session_id or "",
-                    "phase": "diagnosis_dispatch",
-                }
-                tr = await self._dispatch_v2(req, cat, decision)
-                # ensure task_id on result for clients
-                if not tr.task_id:
-                    tr.task_id = task_id
-                agents = []
-                if isinstance(tr.evidence, dict):
-                    agents = list(tr.evidence.get("agents_called") or [])
-                for a in agents:
-                    yield "agent_lifecycle", {
-                        "agent": a,
-                        "status": "completed",
-                        "task_id": tr.task_id or task_id,
-                        "session_id": req.session_id or "",
-                    }
-                if tr.stop_reason and tr.stop_reason not in {"stop_ok", ""}:
-                    yield "diagnosis_stopped", {
-                        "stop_reason": tr.stop_reason,
-                        "task_id": tr.task_id or task_id,
-                    }
-                self._persist_turn(req, tr)
-                yield "complete", tr.to_public_dict()
-                return
-            tr = await self._dispatch_v2(req, cat, decision)
-            self._persist_turn(req, tr)
-            yield "complete", tr.to_public_dict()
             return
 
         graph = self._graph_or_default()

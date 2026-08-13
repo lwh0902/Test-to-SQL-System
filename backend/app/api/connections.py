@@ -5,8 +5,7 @@ from pydantic import BaseModel
 
 from app.core.auth import get_current_user
 from app.services.db_connection_service import (
-    create_connection, list_connections, test_connection,
-    delete_connection, test_direct_connection, discover_schema_direct,
+    create_connection, list_connections, test_connection, delete_connection,
 )
 from app.core.rate_limit import limiter
 from app.services.audit_service import audit_security_event
@@ -23,21 +22,16 @@ class CreateConnectionRequest(BaseModel):
     db_name: str
 
 
-class TestDirectRequest(BaseModel):
-    host: str
-    port: int = 3306
-    db_user: str
-    db_password: str
-    db_name: str
-
-
 @router.post("")
 def create_connection_endpoint(req: CreateConnectionRequest, user: dict = Depends(get_current_user)):
     user_id = user.get("user_id", 1)
-    conn = create_connection(
-        user_id=user_id, name=req.name, host=req.host, port=req.port,
-        db_user=req.db_user, db_password=req.db_password, db_name=req.db_name,
-    )
+    try:
+        conn = create_connection(
+            user_id=user_id, name=req.name, host=req.host, port=req.port,
+            db_user=req.db_user, db_password=req.db_password, db_name=req.db_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return conn
 
 
@@ -45,36 +39,6 @@ def create_connection_endpoint(req: CreateConnectionRequest, user: dict = Depend
 def list_connections_endpoint(user: dict = Depends(get_current_user)):
     user_id = user.get("user_id", 1)
     return {"connections": list_connections(user_id)}
-
-
-@router.post("/test-direct")
-@limiter.limit("10/minute")
-def test_direct_connection_endpoint(request: Request, req: TestDirectRequest, user: dict = Depends(get_current_user)):
-    user_id = user.get("user_id", 1)
-    result = test_direct_connection(
-        host=req.host, port=req.port, db_user=req.db_user,
-        db_password=req.db_password, db_name=req.db_name,
-    )
-    audit_security_event(
-        "connection_direct_test", request.headers.get("X-Request-ID", ""), user_id,
-        ok=result.get("ok", False),
-    )
-    return result
-
-
-@router.post("/discover-schema")
-@limiter.limit("5/minute")
-def discover_schema_direct_endpoint(request: Request, req: TestDirectRequest, user: dict = Depends(get_current_user)):
-    user_id = user.get("user_id", 1)
-    result = discover_schema_direct(
-        host=req.host, port=req.port, db_user=req.db_user,
-        db_password=req.db_password, db_name=req.db_name,
-    )
-    audit_security_event(
-        "connection_schema_discovery", request.headers.get("X-Request-ID", ""), user_id,
-        ok=result.get("ok", False),
-    )
-    return result
 
 
 @router.post("/{connection_id}/test")

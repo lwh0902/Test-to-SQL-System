@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from app.core.auth import get_current_user
 from app.services.session_service import create_session, list_sessions, get_session, delete_session, rename_session
+from app.services.authorization_service import require_space_access
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -23,6 +24,7 @@ class RenameSessionRequest(BaseModel):
 @router.post("")
 def create_session_endpoint(req: CreateSessionRequest, user: dict = Depends(get_current_user)):
     user_id = user.get("user_id", 1)
+    require_space_access(req.space_id, user_id)
     return create_session(user_id, req.space_id, req.title)
 
 

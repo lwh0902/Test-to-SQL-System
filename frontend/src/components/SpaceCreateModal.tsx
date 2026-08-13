@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Modal, Input, Form, Button, Select, Typography, Alert, Steps, Divider } from 'antd';
 import { DatabaseOutlined, PlusOutlined } from '@ant-design/icons';
-import { createConnection, testDirectConnection, listConnections, discoverSchemaDirect } from '../services/api';
+import { createConnection, listConnections, testSavedConnection } from '../services/api';
 
 interface Props {
   open: boolean;
@@ -38,26 +38,18 @@ export default function SpaceCreateModal({ open, onClose, onCreated }: Props) {
     setLoading(true);
     setTestResult(null);
     try {
-      const result = await testDirectConnection({
+      const created = await createConnection({
+        name: values.name || `${values.host}/${values.db_name}`,
         host: values.host,
         port: values.port || 3306,
         db_user: values.db_user,
         db_password: values.db_password,
         db_name: values.db_name,
       });
+      const result = await testSavedConnection(created.id);
+      await loadConnections();
+      setSelectedConnId(created.id);
       setTestResult(result);
-      if (result.ok) {
-        const schemaResult = await discoverSchemaDirect({
-          host: values.host,
-          port: values.port || 3306,
-          db_user: values.db_user,
-          db_password: values.db_password,
-          db_name: values.db_name,
-        });
-        if (schemaResult.ok && schemaResult.schema) {
-          setDiscoveredTables(Object.keys(schemaResult.schema));
-        }
-      }
     } catch {
       setTestResult({ ok: false, error: '连接失败' });
     } finally {
@@ -66,19 +58,9 @@ export default function SpaceCreateModal({ open, onClose, onCreated }: Props) {
   };
 
   const handleCreateConnection = async () => {
-    const values = await form.validateFields();
     if (!testResult?.ok) return;
     setLoading(true);
     try {
-      await createConnection({
-        name: values.name || `${values.host}/${values.db_name}`,
-        host: values.host,
-        port: values.port || 3306,
-        db_user: values.db_user,
-        db_password: values.db_password,
-        db_name: values.db_name,
-      });
-      await loadConnections();
       setStep(1);
     } finally {
       setLoading(false);

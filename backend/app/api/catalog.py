@@ -10,9 +10,12 @@ from pydantic import BaseModel, Field
 from app.agents.catalog_repository import get_catalog_repository
 from app.agents.live_profiler import catalog_contains_secrets, profile_live_mysql
 from app.agents.semantic_catalog import analysis_allowed
-from app.application.connection_registry import register_space_connection
 from app.core.auth import get_current_user
-from app.services.authorization_service import require_space_access
+from app.services.authorization_service import require_admin, require_space_access
+from app.services.authorized_connection_service import (
+    resolve_authorized_connection,
+    upsert_managed_space_connection,
+)
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
 
@@ -77,14 +80,30 @@ def get_readiness(space_id: str, user: dict = Depends(get_current_user)) -> dict
 @router.post("/profile")
 def profile_and_store(body: ProfileIn, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Live profile MySQL and persist catalog for space_id (main-chain load key)."""
-    require_space_access(body.space_id, user["user_id"])
+    space = require_space_access(body.space_id, user["user_id"])
+    if space.get("user_id") is None:
+        require_admin(user)
+        profile_connection = {
+            "host": body.host,
+            "port": body.port,
+            "user": body.user,
+            "password": body.password,
+            "database": body.database,
+        }
+    else:
+        try:
+            profile_connection = resolve_authorized_connection(
+                user_id=user["user_id"], space_id=body.space_id
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="私有空间的数据源不可用") from exc
     try:
         cat = profile_live_mysql(
-            host=body.host,
-            port=body.port,
-            user=body.user,
-            password=body.password,
-            database=body.database,
+            host=profile_connection["host"],
+            port=profile_connection["port"],
+            user=profile_connection["user"],
+            password=profile_connection["password"],
+            database=profile_connection["database"],
             database_id=body.space_id,
             collect_stats=body.collect_stats,
             collect_time_bounds=body.collect_time_bounds,
@@ -98,17 +117,15 @@ def profile_and_store(body: ProfileIn, user: dict = Depends(get_current_user)) -
 
     repo = get_catalog_repository()
     saved = repo.save(body.space_id, cat)
-    # memory-only connection for GuardedMySQLExecutor (never in catalog JSON)
-    register_space_connection(
-        body.space_id,
-        {
-            "host": body.host,
-            "port": body.port,
-            "user": body.user,
-            "password": body.password,
-            "database": body.database,
-        },
-    )
+    if space.get("user_id") is None:
+        upsert_managed_space_connection(
+            space_id=body.space_id,
+            host=body.host,
+            port=body.port,
+            db_user=body.user,
+            db_password=body.password,
+            db_name=body.database,
+        )
     pub = cat.to_public_dict()
     return {
         "ok": True,

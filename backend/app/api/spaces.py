@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from app.core.auth import get_current_user
 from app.services.space_service import list_spaces, get_space, list_space_metrics, list_space_metric_configs, create_user_space
 from app.services.data_map_service import get_data_map, profile_tables
-from app.services.authorization_service import require_space_access
+from app.services.authorization_service import require_admin, require_space_access
 from app.core.rate_limit import limiter
 
 router = APIRouter(prefix="/api/spaces", tags=["spaces"])
@@ -58,5 +58,7 @@ def get_data_map_endpoint(space_id: str, user: dict = Depends(get_current_user))
 @router.post("/{space_id}/profile")
 @limiter.limit("5/minute")
 def profile_tables_endpoint(request: Request, space_id: str, user: dict = Depends(get_current_user)):
-    require_space_access(space_id, user["user_id"])
+    space = require_space_access(space_id, user["user_id"])
+    if space.get("user_id") is None:
+        require_admin(user)
     return profile_tables(space_id)

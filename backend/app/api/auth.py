@@ -43,15 +43,6 @@ class TokenResponse(BaseModel):
 
 
 def _build_token_response(user: dict) -> TokenResponse:
-    # Small-pilot UX: ensure ecommerce + tech_quality mock catalogs/connections
-    # are warm in this process after every successful login (idempotent, fast).
-    try:
-        from app.application.default_mock_bootstrap import bootstrap_default_mocks
-
-        bootstrap_default_mocks(force=False)
-    except Exception:
-        pass
-
     access = create_access_token(
         user_id=user["id"], role=user["role"],
         phone=user.get("phone"), username=user.get("username"),
