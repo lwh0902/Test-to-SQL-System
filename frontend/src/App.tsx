@@ -27,6 +27,7 @@ import {
   register,
   logout as apiLogout,
   getDataMap,
+  getRunEvents,
 } from './services/api';
 import type { SSEEvent, DataMap, DataMapQuestion, Space as SpaceInfo, Session, DiagnosisBundle } from './services/api';
 import type { ChatResponse, MetricCandidate, TraceStep, PlanProgress } from './types';
@@ -96,7 +97,7 @@ function App() {
 
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
-  const [sseSteps, setSseSteps] = useState<{ node: string; status: string }[]>([]);
+  const [sseSteps, setSseSteps] = useState<{ key?: string; node: string; status: string }[]>([]);
   const [streamingAnswer, setStreamingAnswer] = useState('');
   const [messages, setMessages] = useState<
     { role: 'user' | 'assistant'; content: string; data?: ChatResponse }[]
@@ -112,6 +113,9 @@ function App() {
 
   // 停止生成
   const streamRef = useRef<{ close: () => void } | null>(null);
+  const appliedRunEventsRef = useRef<Set<string>>(new Set());
+  const runSequenceRef = useRef<Map<string, number>>(new Map());
+  const activeRunIdRef = useRef<string | null>(null);
 
   // Trace 详情弹窗
   const [traceOpen, setTraceOpen] = useState(false);
@@ -187,15 +191,24 @@ function App() {
   }, [token]);
 
   useEffect(() => {
-    if (!token || !activeSpaceId) {
-      setDataMap(null);
-      return;
+    let cancelled = false;
+    async function loadDataMap() {
+      if (!token || !activeSpaceId) {
+        if (!cancelled) setDataMap(null);
+        return;
+      }
+      setDataMapLoading(true);
+      try {
+        const dataMap = await getDataMap(activeSpaceId);
+        if (!cancelled) setDataMap(dataMap);
+      } catch {
+        if (!cancelled) setDataMap(null);
+      } finally {
+        if (!cancelled) setDataMapLoading(false);
+      }
     }
-    setDataMapLoading(true);
-    getDataMap(activeSpaceId)
-      .then(setDataMap)
-      .catch(() => setDataMap(null))
-      .finally(() => setDataMapLoading(false));
+    void loadDataMap();
+    return () => { cancelled = true; };
   }, [activeSpaceId, token]);
 
   const loadSessions = useCallback(async (spaceId: string) => {
@@ -210,8 +223,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!token) { setSessions([]); return; }
-    loadSessions(activeSpaceId).then((list) => {
+    let cancelled = false;
+    async function restoreSessions() {
+      if (!token) {
+        if (!cancelled) setSessions([]);
+        return;
+      }
+      const list = await loadSessions(activeSpaceId);
+      if (cancelled) return;
       // 恢复或自动选择 — 使用内部函数避免依赖 handleSelectSession
       const savedId = localStorage.getItem('dp_session');
       const targetId = savedId && list.some((s) => s.id === savedId) ? savedId
@@ -230,7 +249,9 @@ function App() {
           applyDiagnosisBundle(sess.diagnosis_bundle);
         }).catch(() => {}).finally(() => setSessionLoading(false));
       }
-    });
+    }
+    void restoreSessions();
+    return () => { cancelled = true; };
   }, [activeSpaceId, loadSessions, token]);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, sseSteps]);
 
@@ -475,6 +496,35 @@ function App() {
     setTraceOpen(true);
   };
 
+  const applyRunEvent = useCallback((raw: Record<string, unknown>) => {
+    const runId = typeof raw.run_id === 'string' ? raw.run_id : '';
+    const seq = typeof raw.seq === 'number' ? raw.seq : 0;
+    if (!runId || seq <= 0) return;
+    const key = `${runId}:${seq}`;
+    if (appliedRunEventsRef.current.has(key)) return;
+    appliedRunEventsRef.current.add(key);
+    activeRunIdRef.current = runId;
+    runSequenceRef.current.set(runId, Math.max(runSequenceRef.current.get(runId) || 0, seq));
+
+    const payload = raw.public_payload && typeof raw.public_payload === 'object'
+      ? raw.public_payload as Record<string, unknown> : {};
+    const agent = typeof raw.agent === 'string' ? raw.agent : '';
+    const step = typeof raw.step === 'string' ? raw.step : '';
+    const eventStatus = typeof raw.status === 'string' ? raw.status : 'running';
+    const summary = typeof payload.summary === 'string' ? payload.summary : `${agent || '分析'} ${step}`;
+    const status = eventStatus === 'completed' ? 'done' : eventStatus === 'failed' ? 'denied' : 'process';
+    setSseSteps((prev) => [...prev, { key, node: summary, status }]);
+    if (agent && agent !== 'run') {
+      setAgentActivities((prev) => [...prev, {
+        agent,
+        step,
+        status: eventStatus === 'started' ? 'running' : eventStatus,
+        summary,
+        artifact_id: typeof raw.artifact_id === 'string' ? raw.artifact_id : undefined,
+      }]);
+    }
+  }, []);
+
   const handleSend = async (question?: string, candidate?: MetricCandidate) => {
     const q = question || inputValue.trim();
     if (!q || loading) return;
@@ -497,10 +547,17 @@ function App() {
       }
     }
 
+    appliedRunEventsRef.current.clear();
+    runSequenceRef.current.clear();
+    activeRunIdRef.current = null;
     setInputValue(''); setLoading(true); setSseSteps([]); setStreamingAnswer(''); setPlanProgress(null);
     setMessages((prev) => [...prev, { role: 'user', content: q }]);
     const stream = streamChat(q, activeSpaceId, sessionId,
       (event: SSEEvent) => {
+        if (event.event === 'run_event') {
+          applyRunEvent(event.data);
+          return;
+        }
         // Plan-and-Execute 事件处理
         if (event.event === 'plan_started') {
           setPlanProgress({ goal: '', steps: [], phase: 'planning' });
@@ -644,6 +701,12 @@ function App() {
         streamRef.current = null;
       },
       (err: Error) => {
+        const runId = activeRunIdRef.current;
+        if (runId) {
+          void getRunEvents(runId, runSequenceRef.current.get(runId) || 0)
+            .then((events) => events.forEach((event) => applyRunEvent(event as unknown as Record<string, unknown>)))
+            .catch(() => undefined);
+        }
         setMessages((prev) => [...prev, {
           role: 'assistant',
           content: `请求失败: ${err.message}`,

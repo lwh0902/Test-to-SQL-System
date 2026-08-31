@@ -444,7 +444,7 @@ def persist_from_agent_state(state):
     # 8. 每六个用户轮次压缩一次；摘要仅以当前 session/user/space 读取。
     try:
         from app.services.session_memory_service import refresh_session_memory
-        messages = load_recent_messages(session_id, limit=12, user_id=state.user_id, space_id=state.space_id)
+        messages = load_recent_messages(session_id, limit=20, user_id=state.user_id, space_id=state.space_id)
         refresh_session_memory(session_id, state.user_id, state.space_id, messages)
     except Exception:
         pass

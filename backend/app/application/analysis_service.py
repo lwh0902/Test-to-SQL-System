@@ -1,12 +1,14 @@
-"""AnalysisApplicationService — unique product entry for JSON + SSE (R1a–R1c).
+"""AnalysisApplicationService — unique V2 product entry for JSON + SSE.
 
-Business logic lives here. FastAPI routes only adapt transport.
-kernel_route from pilot flags: analysis_kernel_v2 | legacy_rollback (R1c).
+Business logic lives here. FastAPI routes only adapt transport.  Historical
+LangGraph code remains only as deprecated source and is not production-routable.
 """
 
 from __future__ import annotations
 
 import os
+import asyncio
+import inspect
 from typing import Any, AsyncIterator, Optional
 
 from app.application.contracts import (
@@ -39,6 +41,12 @@ from app.agents.semantic_spec_builder import build_analysis_spec
 from app.services.semantic_model_service import get_semantic_model_service
 from app.pilot.flags import PilotFlags, default_flags
 from app.services.agent import AgentState, get_graph
+from app.services.run_store import InMemoryRunStore, RunEventChannel, get_run_store
+
+
+def _record_run_event(sink: Any, **event: Any) -> None:
+    if sink is not None:
+        sink.emit(**event)
 
 
 def _should_generate_analysis_answer(response_type: str, has_data: bool, has_plan: bool) -> bool:
@@ -300,6 +308,7 @@ class AnalysisApplicationService:
         pending_query_repo: Any = None,
         diagnosis_repo: Any = None,
         diagnosis_agent_call: Any = None,
+        run_store: Any = None,
     ) -> None:
         self._graph = graph
         self._flags = flags
@@ -315,6 +324,10 @@ class AnalysisApplicationService:
         self._diagnosis_repo = diagnosis_repo
         # None → production dispatcher_agent_call (R5.5b). Tests may inject component_only.
         self._diagnosis_agent_call = diagnosis_agent_call
+        # Production injects the MySQL-backed singleton through the factory.
+        # A directly constructed service is common in tests and local harnesses;
+        # keep it self-contained rather than opening an implicit DB connection.
+        self._run_store = run_store or InMemoryRunStore()
 
     def _graph_or_default(self) -> Any:
         return self._graph if self._graph is not None else get_graph()
@@ -338,6 +351,9 @@ class AnalysisApplicationService:
             if self._diagnosis_repo is not None
             else get_diagnosis_summary_repository()
         )
+
+    def _run_store_or_default(self):
+        return self._run_store
 
     def _run_precheck(self, req: TurnRequest):
         if self.skip_data_plane_precheck:
@@ -666,7 +682,7 @@ class AnalysisApplicationService:
                 from app.services.persistence import load_recent_messages
 
                 recent = load_recent_messages(
-                    req.session_id, limit=4, user_id=req.user_id, space_id=req.space_id
+                    req.session_id, limit=20, user_id=req.user_id, space_id=req.space_id
                 )
                 st = self._state_repo_or_default().load(req.session_id, req.user_id, req.space_id)
                 if st is not None:
@@ -1028,7 +1044,9 @@ class AnalysisApplicationService:
                 tr.response_type = "answer"
         return self._attach_supervisor(tr, decision)
 
-    async def _dispatch_v2(self, req: TurnRequest, cat, decision: SupervisorDecision) -> TurnResult:
+    async def _dispatch_v2(
+        self, req: TurnRequest, cat, decision: SupervisorDecision, *, event_sink: Any = None
+    ) -> TurnResult:
         """Dispatch by TaskSpec only — no parallel keyword routers."""
         intent = decision.intent
         task_type = decision.task_spec.task_type
@@ -1053,7 +1071,19 @@ class AnalysisApplicationService:
             return self._attach_supervisor(tr, decision)
 
         if intent == "diagnosis" or task_type == "diagnosis_playbook":
-            tr = await self._run_v2_diagnosis(req, cat)
+            _record_run_event(
+                event_sink, kind="diagnosis", status="started", agent="diagnosis", step="procedure",
+                public_payload={"summary": "正在执行诊断流程"},
+            )
+            tr = await self._run_v2_diagnosis(req, cat, event_sink=event_sink)
+            _record_run_event(
+                event_sink,
+                kind="diagnosis",
+                status="completed" if tr.terminal_status not in {"", "EXECUTION_ERROR", "TIMEOUT"} else "failed",
+                agent="diagnosis",
+                step="procedure",
+                public_payload={"summary": "诊断流程已结束", "stop_reason": tr.stop_reason},
+            )
             return self._attach_supervisor(tr, decision)
 
         if intent in {"data_query", "follow_up", "schema_understanding", "table_query"}:
@@ -1061,7 +1091,15 @@ class AnalysisApplicationService:
                 return self._catalog_not_ready_result(req, decision)
             # schema_understanding: catalog-driven OP briefing (not bare table names)
             if intent == "schema_understanding" and task_type == "schema_inventory":
+                _record_run_event(
+                    event_sink, kind="catalog", status="started", agent="catalog", step="inventory",
+                    public_payload={"summary": "正在读取数据目录"},
+                )
                 tr = self._schema_inventory_from_catalog(req, cat, decision)
+                _record_run_event(
+                    event_sink, kind="catalog", status="completed", agent="catalog", step="inventory",
+                    public_payload={"summary": "已生成数据目录"},
+                )
                 return self._attach_supervisor(tr, decision)
             # use resolved_question for analysis
             resolved = decision.resolved_question or req.question
@@ -1069,8 +1107,13 @@ class AnalysisApplicationService:
             orig_q = req.question
             try:
                 req.question = resolved
-                tr = self._run_v2_analysis(
-                    req, cat, decision=decision, original_question=orig_q
+                tr = await asyncio.to_thread(
+                    self._run_v2_analysis,
+                    req,
+                    cat,
+                    decision=decision,
+                    original_question=orig_q,
+                    event_sink=event_sink,
                 )
             finally:
                 req.question = orig_q
@@ -1106,8 +1149,82 @@ class AnalysisApplicationService:
             # Persistence must not break the user-facing turn.
             pass
 
+    async def _handle_v2(self, req: TurnRequest, event_sink: Any = None) -> TurnResult:
+        """The V2 product workflow, optionally projected as committed run events."""
+        if detect_write_intent(req.question).refuse:
+            tr = _l0_refuse_result(req, kernel_route=self.kernel_route)
+            self._persist_turn(req, tr)
+            return tr
+
+        pre = self._run_precheck(req)
+        if pre is not None and not pre.ok:
+            tr = _blocked_for_pilot_result(req, pre, kernel_route=self.kernel_route)
+            self._persist_turn(req, tr)
+            return tr
+
+        cat = self._load_catalog_for_turn(req)
+        blocked = self._catalog_block_if_needed(req, cat)
+        if blocked is not None:
+            self._persist_turn(req, blocked)
+            return blocked
+
+        resumed_question, pending_response = self._resolve_pending_time(req)
+        if pending_response is not None:
+            self._persist_turn(req, pending_response)
+            return pending_response
+        original_reply = req.question
+        if resumed_question:
+            req.question = resumed_question
+        try:
+            _record_run_event(
+                event_sink, kind="supervisor", status="started", agent="supervisor", step="route",
+                public_payload={"summary": "正在识别问题类型"},
+            )
+            decision = await asyncio.to_thread(self._run_supervisor, req)
+            _record_run_event(
+                event_sink, kind="supervisor", status="completed", agent="supervisor", step="route",
+                public_payload={
+                    "intent": getattr(decision, "intent", ""),
+                    "route": getattr(decision, "route", ""),
+                    "summary": "已完成问题识别",
+                },
+            )
+            paused = self._pause_for_time_confirmation(req, decision)
+            if paused is not None:
+                tr = paused
+            else:
+                # A few lightweight integrations replace _dispatch_v2 with the
+                # original three-argument hook.  Preserve that seam while the
+                # production implementation receives the event projection.
+                dispatch_params = inspect.signature(self._dispatch_v2).parameters.values()
+                accepts_event_sink = any(
+                    param.name == "event_sink" or param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in dispatch_params
+                )
+                if accepts_event_sink:
+                    tr = await self._dispatch_v2(req, cat, decision, event_sink=event_sink)
+                else:
+                    tr = await self._dispatch_v2(req, cat, decision)
+        except Exception as exc:
+            _record_run_event(
+                event_sink, kind="supervisor", status="failed", agent="supervisor", step="route",
+                public_payload={"error_code": type(exc).__name__, "summary": "问题识别失败"},
+            )
+            raise
+        finally:
+            req.question = original_reply
+        if resumed_question and tr.terminal_status in {
+            QueryOutcomeStatus.SUCCESS_WITH_DATA.value,
+            QueryOutcomeStatus.SUCCESS_EMPTY.value,
+        }:
+            self._pending_query_repo_or_default().delete(req.session_id, req.user_id, req.space_id)
+        self._persist_turn(req, tr)
+        return tr
+
     async def handle_turn(self, req: TurnRequest) -> TurnResult:
         """Blocking JSON path — always returns a final TurnResult (incl. diagnosis)."""
+        if self.kernel_route == KERNEL_V2:
+            return await self._handle_v2(req)
         # L0 write refuse — before graph / LLM / schema (both kernel routes)
         if detect_write_intent(req.question).refuse:
             tr = _l0_refuse_result(req, kernel_route=self.kernel_route)
@@ -1191,6 +1308,7 @@ class AnalysisApplicationService:
         *,
         decision: SupervisorDecision | None = None,
         original_question: str | None = None,
+        event_sink: Any = None,
     ) -> TurnResult:
         """R3+R4: controlled loop with ActiveAnalysisState load/save + live MySQL."""
         try:
@@ -1238,20 +1356,13 @@ class AnalysisApplicationService:
                         prior = None
                     else:
                         prior = raw
-                else:
-                    # fingerprint gate inside load returned None — confirm stale
-                    try:
-                        import json
-                        p = state_repo._path(req.session_id, req.user_id, req.space_id)
-                        data = json.loads(p.read_text(encoding="utf-8"))
-                        stored_fp = str(data.get("catalog_fingerprint") or "")
-                        if stored_fp and cat.schema_fingerprint and stored_fp != cat.schema_fingerprint:
-                            state_invalidated = True
-                    except Exception:
-                        pass
 
         semantic_model = get_semantic_model_service().load_or_build(req.space_id, cat)
         prior_spec = prior.to_spec(original_question=req.question).to_dict() if prior else None
+        _record_run_event(
+            event_sink, kind="semantic", status="started", agent="semantic", step="parse",
+            public_payload={"summary": "正在校验指标和筛选条件"},
+        )
         parsed = SemanticParser().parse(
             req.question,
             semantic_model,
@@ -1260,6 +1371,10 @@ class AnalysisApplicationService:
             original_question=original_question,
         )
         if not parsed.ok or parsed.query is None:
+            _record_run_event(
+                event_sink, kind="semantic", status="failed", agent="semantic", step="parse",
+                public_payload={"summary": "无法确认指标或条件"},
+            )
             tr = self._enrich_clarification(
                 req,
                 "我还不能把这个问题可靠地映射到当前空间已定义的业务指标。请补充指标、对象或时间范围。",
@@ -1273,6 +1388,10 @@ class AnalysisApplicationService:
             }
             return tr
         if parsed.query.operation == "clarify" or parsed.query.unresolved_slots:
+            _record_run_event(
+                event_sink, kind="semantic", status="failed", agent="semantic", step="parse",
+                public_payload={"summary": "需要补充查询条件"},
+            )
             return self._enrich_clarification(
                 req,
                 "还需要补充信息才能准确查询。",
@@ -1284,6 +1403,10 @@ class AnalysisApplicationService:
                 parsed.query, semantic_model, cat, original_question=req.question
             )
         except ValueError:
+            _record_run_event(
+                event_sink, kind="semantic", status="failed", agent="semantic", step="validate",
+                public_payload={"summary": "指标或维度未在当前空间确认"},
+            )
             return self._enrich_clarification(
                 req,
                 "这个问题中的指标或维度还没有在当前空间确认。",
@@ -1313,6 +1436,10 @@ class AnalysisApplicationService:
                 semantic_spec.filters, original_question or req.question, values
             )
             if resolution.ambiguities:
+                _record_run_event(
+                    event_sink, kind="semantic", status="failed", agent="semantic", step="grounding",
+                    public_payload={"summary": "需要补充业务名称"},
+                )
                 return self._enrich_clarification(
                     req,
                     "找到了多个可能的业务名称，请补充更完整的渠道、供应商或产品名称。",
@@ -1338,6 +1465,10 @@ class AnalysisApplicationService:
                 values if "values" in locals() else [],
             )
             if not coverage.ok:
+                _record_run_event(
+                    event_sink, kind="semantic", status="failed", agent="semantic", step="validate",
+                    public_payload={"summary": "查询条件未完整确认"},
+                )
                 tr = self._enrich_clarification(
                     req,
                     "我识别到的问题条件没有完整进入查询计划，为避免返回错误数据，请换一种说法或稍后重试。",
@@ -1355,6 +1486,11 @@ class AnalysisApplicationService:
             # validation path rather than turning a safe request into an outage.
             pass
 
+        _record_run_event(
+            event_sink, kind="semantic", status="completed", agent="semantic", step="parse",
+            public_payload={"summary": "已生成受约束查询计划"},
+        )
+
         loop = run_controlled_turn(
             req.question,
             cat,
@@ -1366,6 +1502,7 @@ class AnalysisApplicationService:
             allow_heavy=False,
             prebuilt_spec=semantic_spec,
             semantic_followup=parsed.query.operation == "modify_query",
+            event_sink=event_sink,
         )
 
         # Persist state after successful answer / query with state
@@ -1377,9 +1514,23 @@ class AnalysisApplicationService:
                     loop.state.catalog_fingerprint = cat.schema_fingerprint or ""
                 if not loop.state.catalog_version:
                     loop.state.catalog_version = str(getattr(cat, "version", "") or "")
-                state_repo.save(loop.state)
-            except Exception:
-                pass
+                # ``prior`` is the version read for this turn.  A newly created
+                # ActiveAnalysisState starts at logical version 1, so inferred
+                # versions are ambiguous; make the compare-and-swap explicit.
+                saved = state_repo.save(
+                    loop.state,
+                    expected_version=int(getattr(prior, "version", 0) or 0),
+                )
+                if not saved.get("ok"):
+                    _record_run_event(
+                        event_sink, kind="state", status="failed", agent="state", step="persist",
+                        public_payload={"summary": "会话上下文未保存", "error_code": saved.get("error", "unknown")},
+                    )
+            except Exception as exc:
+                _record_run_event(
+                    event_sink, kind="state", status="failed", agent="state", step="persist",
+                    public_payload={"summary": "会话上下文未保存", "error_code": type(exc).__name__},
+                )
 
         # Map controlled loop → product TurnResult
         if loop.action == "clarify":
@@ -1551,7 +1702,7 @@ class AnalysisApplicationService:
             },
         )
 
-    async def _run_v2_diagnosis(self, req: TurnRequest, cat) -> TurnResult:
+    async def _run_v2_diagnosis(self, req: TurnRequest, cat, *, event_sink: Any = None) -> TurnResult:
         """R5: admission → evidence diagnosis pipeline → summary writeback."""
         import time as _time
 
@@ -1666,7 +1817,7 @@ class AnalysisApplicationService:
                     st.approved_report_id = (
                         result.summary.report_ref if result.approved else None
                     )
-                    self._state_repo_or_default().save(st)
+                    self._state_repo_or_default().save(st, expected_version=int(st.version or 0))
             except Exception:
                 pass
 
@@ -1767,29 +1918,56 @@ class AnalysisApplicationService:
 
         Does not format SSE text — adapter + SseTerminalGuard do that.
         """
-        # V2 has one product workflow.  JSON and SSE must not independently
-        # implement Supervisor, pending confirmation, dispatch or persistence.
-        # SSE is only a transport adapter around the canonical blocking result.
+        # V2 streams committed execution facts. The queue is only a live
+        # projection; replay always reads the database-backed event timeline.
         if self.kernel_route == KERNEL_V2:
-            yield "run_started", {
-                "session_id": req.session_id or "",
-                "space_id": req.space_id or "",
-            }
-            tr = await self.handle_turn(req)
-            if isinstance(tr.task_spec, dict) and tr.task_spec.get("task_type") == "diagnosis_playbook":
-                yield "agent_lifecycle", {
-                    "agent": "supervisor",
-                    "status": "completed",
-                    "task_id": tr.task_id or "",
-                    "session_id": req.session_id or "",
-                    "phase": "diagnosis_dispatch",
-                }
-                if tr.stop_reason and tr.stop_reason not in {"stop_ok", ""}:
-                    yield "diagnosis_stopped", {
-                        "stop_reason": tr.stop_reason,
-                        "task_id": tr.task_id or "",
-                    }
-            yield "complete", tr.to_public_dict()
+            store = self._run_store_or_default()
+            run = store.create_run(
+                session_id=req.session_id or "", user_id=req.user_id,
+                space_id=req.space_id or "", question=req.question or "",
+            )
+            channel = RunEventChannel(store, run["run_id"], asyncio.get_running_loop())
+            channel.emit(
+                kind="run", status="started", agent="run", step="start",
+                public_payload={"summary": "分析任务已开始"},
+            )
+            task = asyncio.create_task(self._handle_v2(req, channel))
+            while not task.done():
+                try:
+                    event = await asyncio.wait_for(channel.queue.get(), timeout=0.05)
+                    yield "run_event", event
+                except asyncio.TimeoutError:
+                    continue
+            while not channel.queue.empty():
+                yield "run_event", channel.queue.get_nowait()
+            try:
+                tr = task.result()
+                run_status = "completed"
+            except Exception as exc:
+                tr = TurnResult(
+                    response_type="error",
+                    message="分析执行失败，请稍后重试。",
+                    answer="分析执行失败，请稍后重试。",
+                    terminal_status="EXECUTION_ERROR",
+                    stop_reason="run_error",
+                    kernel_route=self.kernel_route,
+                )
+                channel.emit(
+                    kind="run", status="failed", agent="run", step="finish",
+                    public_payload={"summary": "分析任务失败", "error_code": type(exc).__name__},
+                )
+                run_status = "failed"
+            store.finish_run(run["run_id"], status=run_status, terminal_status=tr.terminal_status)
+            if run_status == "completed":
+                channel.emit(
+                    kind="run", status="completed", agent="run", step="finish",
+                    public_payload={"summary": "分析任务已完成", "terminal_status": tr.terminal_status},
+                )
+            while not channel.queue.empty():
+                yield "run_event", channel.queue.get_nowait()
+            complete = tr.to_public_dict()
+            complete["run_id"] = run["run_id"]
+            yield "complete", complete
             return
 
         if detect_write_intent(req.question).refuse:
@@ -1971,7 +2149,7 @@ class AnalysisApplicationService:
             from app.services.persistence import load_recent_messages
 
             history = load_recent_messages(
-                req.session_id, limit=8, user_id=req.user_id, space_id=req.space_id
+                req.session_id, limit=20, user_id=req.user_id, space_id=req.space_id
             )
             for msg in reversed(history or []):
                 if msg.get("role") != "assistant":
@@ -2243,5 +2421,9 @@ class AnalysisApplicationService:
 
 
 def get_analysis_service() -> AnalysisApplicationService:
-    """Factory: resolve flags → kernel_route; precheck on each turn."""
-    return AnalysisApplicationService(flags=default_flags())
+    """Production factory: V2 is the only selectable analysis runtime."""
+    return AnalysisApplicationService(
+        kernel_route=KERNEL_V2,
+        flags=default_flags(),
+        run_store=get_run_store(),
+    )

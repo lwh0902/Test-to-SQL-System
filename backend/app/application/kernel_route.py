@@ -1,7 +1,7 @@
-"""Resolve kernel_route from pilot flags (dev_spec §3.4 / R1c).
+"""Production route selection.
 
-Flag ON  → analysis_kernel_v2
-Flag OFF → legacy_rollback (never disguise as v2)
+The legacy LangGraph implementation is retained only as deprecated source until
+2026-10-31.  It is no longer a selectable production route.
 """
 
 from __future__ import annotations
@@ -13,10 +13,8 @@ from app.pilot.flags import PilotFlags, default_flags, is_enabled
 
 
 def resolve_kernel_route(flags: PilotFlags | None = None) -> str:
-    f = flags if flags is not None else default_flags()
-    if is_enabled(f, "analysis_kernel"):
-        return KERNEL_V2
-    return KERNEL_LEGACY
+    _ = flags if flags is not None else default_flags()
+    return KERNEL_V2
 
 
 def score_sample_allowed(*, kernel_route: str, require_v2: bool = True) -> bool:

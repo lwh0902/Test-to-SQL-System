@@ -342,6 +342,25 @@ export interface SSEEvent {
   data: Record<string, unknown>;
 }
 
+export interface RunEvent {
+  run_id: string;
+  seq: number;
+  kind: string;
+  status: string;
+  agent: string;
+  step: string;
+  artifact_id: string;
+  public_payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function getRunEvents(runId: string, afterSeq = 0): Promise<RunEvent[]> {
+  const res = await fetchWithAuth(`${API_BASE}/runs/${encodeURIComponent(runId)}/events?after_seq=${afterSeq}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = await res.json() as { events?: RunEvent[] };
+  return body.events || [];
+}
+
 export interface DiagnosisStreamOptions {
   seedQuery?: {
     columns?: string[];

@@ -107,7 +107,8 @@ export default function GooeyNav({
 
   useEffect(() => {
     if (initialActiveIndex >= 0 && initialActiveIndex < items.length) {
-      setActiveIndex(initialActiveIndex);
+      const frame = window.requestAnimationFrame(() => setActiveIndex(initialActiveIndex));
+      return () => window.cancelAnimationFrame(frame);
     }
   }, [initialActiveIndex, items.length]);
 

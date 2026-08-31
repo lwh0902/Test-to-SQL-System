@@ -74,6 +74,7 @@ export interface ChatResponse {
   stop_reason?: string | null;
   kernel_route?: string | null;
   task_id?: string | null;
+  run_id?: string | null;
   evidence?: Record<string, unknown> | null;
   artifacts?: Array<Record<string, unknown>>;
   query_outcome?: Record<string, unknown> | null;

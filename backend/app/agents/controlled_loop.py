@@ -165,6 +165,7 @@ def run_turn(
     allow_heavy: bool = False,
     prebuilt_spec: Optional[AnalysisSpec] = None,
     semantic_followup: bool = False,
+    event_sink: Any = None,
 ) -> TurnResult:
     """One user turn: observe → decide → act (bounded)."""
     budget = budget or ControlledBudget()
@@ -289,8 +290,18 @@ def run_turn(
         for h in HEAVY_AGENTS:
             assert h not in agents_called
 
+    if event_sink is not None:
+        event_sink.emit(
+            kind="sql_compile", status="started", agent="query", step="compile",
+            public_payload={"summary": "正在生成安全只读查询"},
+        )
     cr = compile_and_guard(spec, catalog)
     if not cr.ok:
+        if event_sink is not None:
+            event_sink.emit(
+                kind="sql_compile", status="failed", agent="query", step="compile",
+                public_payload={"summary": "安全查询编译失败"},
+            )
         return TurnResult(
             action="refuse",
             spec=spec,
@@ -305,6 +316,15 @@ def run_turn(
             latency_ms=(time.perf_counter() - t0) * 1000,
         )
 
+    if event_sink is not None:
+        event_sink.emit(
+            kind="sql_compile", status="completed", agent="query", step="compile",
+            public_payload={"summary": "已生成安全只读查询"},
+        )
+        event_sink.emit(
+            kind="query", status="started", agent="query", step="execute",
+            public_payload={"summary": "正在执行只读查询"},
+        )
     outcome: Optional[QueryOutcome] = None
     if mysql_connection or mysql_engine is not None:
         from app.agents.guarded_mysql_executor import execute_sql_mysql
@@ -322,6 +342,21 @@ def run_turn(
         )
     elif schema_sql:
         outcome = execute_sql_on_seed(cr.sql, schema_sql=schema_sql, seed_sql=seed_sql)
+    if event_sink is not None:
+        event_sink.emit(
+            kind="query",
+            status="completed" if outcome is not None and outcome.status in {
+                QueryOutcomeStatus.SUCCESS_WITH_DATA, QueryOutcomeStatus.SUCCESS_EMPTY
+            } else "failed",
+            agent="query",
+            step="execute",
+            public_payload={
+                "summary": "只读查询已完成" if outcome is not None and outcome.status in {
+                    QueryOutcomeStatus.SUCCESS_WITH_DATA, QueryOutcomeStatus.SUCCESS_EMPTY
+                } else "只读查询失败",
+                "rows_count": int(outcome.rows_count or 0) if outcome is not None else 0,
+            },
+        )
     evidence = EvidenceBundle(
         analysis_spec_id=spec.spec_id,
         query_outcome_id=outcome.outcome_id if outcome else None,

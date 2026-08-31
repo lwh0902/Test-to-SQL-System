@@ -2,7 +2,7 @@
 
 import json
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import text
 
@@ -26,8 +26,23 @@ from app.services.authorization_service import (
     require_trace_access,
 )
 from app.services.trace_store import trace_store
+from app.services.run_store import get_run_store
 
 router = APIRouter()
+
+
+@router.get("/api/runs/{run_id}/events")
+def get_run_events(run_id: str, after_seq: int = 0, user: dict = Depends(get_current_user)):
+    """Replay committed public lifecycle facts after a client sequence number."""
+    store = get_run_store()
+    run = store.get_run(run_id, user_id=int(user["user_id"]))
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    require_session_access(run["session_id"], user["user_id"], run["space_id"])
+    return {
+        "run_id": run_id,
+        "events": store.list_events(run_id, user_id=int(user["user_id"]), after_seq=max(0, int(after_seq))),
+    }
 
 
 # ======== Trace API ========
@@ -164,6 +179,7 @@ def _to_chat_response(public: dict) -> ChatResponse:
         stop_reason=public.get("stop_reason") or None,
         kernel_route=public.get("kernel_route") or None,
         task_id=public.get("task_id"),
+        run_id=public.get("run_id"),
         data_map=public.get("data_map") if isinstance(public.get("data_map"), dict) else None,
         db_identity=public.get("db_identity") if isinstance(public.get("db_identity"), dict) else None,
     )
@@ -194,7 +210,7 @@ async def chat_stream(request: Request, req: ChatRequest, user: dict = Depends(g
                     "type": "error",
                     "message": "服务未返回终态",
                     "terminal_status": "STOP_ERROR",
-                    "kernel_route": "legacy_rollback",
+                    "kernel_route": "analysis_kernel_v2",
                     "trace_id": "",
                     "rows": [],
                     "rows_count": 0,
@@ -228,6 +244,14 @@ async def chat(request: Request, req: ChatRequest, user: dict = Depends(get_curr
 
     turn_req = _turn_request(req, user)
     service = get_analysis_service()
-    result = await service.handle_turn(turn_req)
-    public = result.to_public_dict()
+    # Keep JSON and SSE on the same V2 execution chain.  The JSON transport
+    # intentionally discards intermediate frames, but the committed run/event
+    # facts and returned run_id remain available for audit or later replay.
+    public: dict = {}
+    async for event_name, data in service.handle_turn_stream(turn_req):
+        if event_name == "complete":
+            public = data if isinstance(data, dict) else {}
+            break
+    if not public:
+        raise HTTPException(status_code=500, detail="analysis run ended without a terminal result")
     return _to_chat_response(public)

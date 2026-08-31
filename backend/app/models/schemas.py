@@ -71,6 +71,7 @@ class ChatResponse(BaseModel):
     stop_reason: str | None = None
     kernel_route: str | None = None
     task_id: str | None = None
+    run_id: str | None = None
     # UX / observability (optional; frontend uses when present)
     evidence: dict | None = None
     artifacts: list[dict] = []
