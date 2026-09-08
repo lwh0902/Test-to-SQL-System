@@ -13,6 +13,8 @@ import {
   LogoutOutlined,
   MenuOutlined,
   DatabaseOutlined,
+  CompassOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import {
   downloadExport,
@@ -28,11 +30,13 @@ import {
   logout as apiLogout,
   getDataMap,
   getRunEvents,
+  pinQueryToBoard,
 } from './services/api';
 import type { SSEEvent, DataMap, DataMapQuestion, Space as SpaceInfo, Session, DiagnosisBundle } from './services/api';
 import type { ChatResponse, MetricCandidate, TraceStep, PlanProgress } from './types';
 
 import ChatMessage from './components/ChatMessage';
+import BoardView from './components/BoardView';
 import DataMapBlock from './components/DataMapBlock';
 import TraceDetailModal from './components/TraceDetailModal';
 import SpaceCreateModal from './components/SpaceCreateModal';
@@ -56,6 +60,7 @@ const GLASS_BLUR = 'blur(16px)';
 const SPACE_META: Record<string, { icon: React.ReactNode; color: string }> = {
   tech_quality: { icon: <BugOutlined />, color: BRAND_MUTED },
   ecommerce: { icon: <ShoppingCartOutlined />, color: '#6E6A82' },
+  travel_b2b: { icon: <CompassOutlined />, color: '#C4C0D4' },
 };
 
 const EVENT_LABELS: Record<string, string> = {
@@ -110,6 +115,7 @@ function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ id: string; title: string } | null>(null);
   const [showDataScope, setShowDataScope] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<'chat' | 'board'>('chat');
 
   // 停止生成
   const streamRef = useRef<{ close: () => void } | null>(null);
@@ -296,6 +302,7 @@ function App() {
       setActiveSessionId(sid);
       localStorage.setItem('dp_session', sid);
       setMessages([]); setSseSteps([]); setDiagnosisReport(null); setAgentActivities([]);
+      setWorkspaceView('chat');
       loadSessions(activeSpaceId);
     } catch {
       message.error('创建会话失败');
@@ -307,6 +314,7 @@ function App() {
   const handleSelectSession = async (sessionId: string) => {
     setActiveSessionId(sessionId);
     localStorage.setItem('dp_session', sessionId);
+    setWorkspaceView('chat');
     setSessionLoading(true);
     try {
       const sess = await import('./services/api').then((m) => m.getSession(sessionId));
@@ -496,6 +504,26 @@ function App() {
     setTraceOpen(true);
   };
 
+  const handlePinToBoard = async (queryId: string, title: string) => {
+    try {
+      await pinQueryToBoard(activeSpaceId, queryId, title);
+      message.success('已钉到经营看板');
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : '钉盘失败');
+    }
+  };
+
+  const handleOpenBoardChat = (sessionId: string, title: string) => {
+    setWorkspaceView('chat');
+    setActiveSessionId(sessionId);
+    localStorage.setItem('dp_session', sessionId);
+    setMessages([]);
+    setSseSteps([]);
+    setDiagnosisReport(null);
+    loadSessions(activeSpaceId);
+    message.success(`已进入「${title}」，可以直接追问`);
+  };
+
   const applyRunEvent = useCallback((raw: Record<string, unknown>) => {
     const runId = typeof raw.run_id === 'string' ? raw.run_id : '';
     const seq = typeof raw.seq === 'number' ? raw.seq : 0;
@@ -528,6 +556,7 @@ function App() {
   const handleSend = async (question?: string, candidate?: MetricCandidate) => {
     const q = question || inputValue.trim();
     if (!q || loading) return;
+    setWorkspaceView('chat');
 
     // P3: 诊断意图由后端 Supervisor 判定；前端不再用关键词 hack 分流。
     // 显式按钮「深度诊断」/「基于当前结果生成报告」仍走 runDiagnosis（button path）。
@@ -836,6 +865,7 @@ function App() {
               localStorage.removeItem('dp_session');
               setActiveSessionId(null);
               setMessages([]);
+              setWorkspaceView('chat');
               setDrawerOpen(false);
             }}
           />
@@ -1001,6 +1031,32 @@ function App() {
               · {activeSpace?.description}
             </Text>
           </div>
+          {activeSpaceId === 'travel_b2b' && (
+            <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+              <Button
+                size="small"
+                icon={<MessageOutlined />}
+                type={workspaceView === 'chat' ? 'primary' : 'default'}
+                onClick={() => setWorkspaceView('chat')}
+                style={workspaceView === 'chat'
+                  ? { background: 'rgba(255,255,255,0.92)', color: '#0B0B0F', borderColor: 'transparent' }
+                  : { color: BRAND_TEXT, borderColor: BRAND_BORDER, background: 'transparent' }}
+              >
+                对话
+              </Button>
+              <Button
+                size="small"
+                icon={<AppstoreOutlined />}
+                type={workspaceView === 'board' ? 'primary' : 'default'}
+                onClick={() => setWorkspaceView('board')}
+                style={workspaceView === 'board'
+                  ? { background: 'rgba(255,255,255,0.92)', color: '#0B0B0F', borderColor: 'transparent' }
+                  : { color: BRAND_TEXT, borderColor: BRAND_BORDER, background: 'transparent' }}
+              >
+                看板
+              </Button>
+            </div>
+          )}
           {user && (
             <div className="mobile-user-avatar" style={{ display: 'none' }}>
               <div style={{
@@ -1015,6 +1071,11 @@ function App() {
 
         {/* 对话区 */}
         <Content style={{ flex: 1, overflow: 'auto', display: 'flex', justifyContent: 'center', background: 'transparent' }}>
+          {activeSpaceId === 'travel_b2b' && workspaceView === 'board' ? (
+            <div style={{ maxWidth: 1100, width: '100%', padding: '24px 20px' }}>
+              <BoardView spaceId={activeSpaceId} onOpenChat={handleOpenBoardChat} />
+            </div>
+          ) : (
           <div style={{ maxWidth: 860, width: '100%', padding: '24px 20px' }}>
             {sessionLoading && (
               <div style={{ textAlign: 'center', padding: '60px 0' }}>
@@ -1113,7 +1174,8 @@ function App() {
                 onCandidateClick={handleCandidateClick}
                 onDataMapQuestionClick={handleQuestionClick}
                 onOpenTrace={handleOpenTrace}
-                onGenerateDiagnosis={handleGenerateDiagnosisFromResult} />
+                onGenerateDiagnosis={handleGenerateDiagnosisFromResult}
+                onPinToBoard={activeSpaceId === 'travel_b2b' ? handlePinToBoard : undefined} />
             ))}
 
             {/* ===== Assistant Pending Bubble — 所有进度统一在这里 ===== */}
@@ -1233,9 +1295,11 @@ function App() {
 
             <div ref={messagesEndRef} />
           </div>
+          )}
         </Content>
 
         {/* 输入区 */}
+        {!(activeSpaceId === 'travel_b2b' && workspaceView === 'board') && (
         <div style={{ background: 'transparent', padding: '20px 24px' }}>
           <div style={{ maxWidth: 800, margin: '0 auto' }}>
             <div style={{
@@ -1275,6 +1339,7 @@ function App() {
             </div>
           </div>
         </div>
+        )}
       </Layout>
 
       <SpaceCreateModal

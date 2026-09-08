@@ -5,6 +5,9 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,9 +16,6 @@ from slowapi.errors import RateLimitExceeded
 
 from app.core.rate_limit import limiter
 from app.core.config import validate_security_config
-
-env_path = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(env_path)
 
 if os.getenv("JWT_SECRET", "") in ("", "change-me-in-production", "datapilot-secret-key-change-in-prod"):
     import warnings
@@ -32,6 +32,7 @@ from app.api.diagnosis import router as diagnosis_router
 from app.api.exports import router as exports_router
 from app.api.pilot import router as pilot_router
 from app.api.catalog import router as catalog_router
+from app.api.boards import router as boards_router
 
 app = FastAPI(
     title="DataPilot Agent",
@@ -69,6 +70,7 @@ app.include_router(diagnosis_router)
 app.include_router(exports_router)
 app.include_router(pilot_router)
 app.include_router(catalog_router)
+app.include_router(boards_router)
 
 # Optional A2A lease worker (outbox retry). Enable with A2A_WORKER_ENABLED=true
 _a2a_worker = None

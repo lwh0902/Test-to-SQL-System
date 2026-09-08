@@ -123,7 +123,7 @@ def build_seed_semantic_model(space_id: str, catalog: SemanticCatalog) -> Semant
             SemanticDimension("supplier_name", "order", "supplier_name", "成交供应商名称", ("供应商",)),
             SemanticDimension("region_group", "order", "region_group", "区域分组", ("地区", "区域")),
             SemanticDimension("country", "order", "country", "国家", ()),
-            SemanticDimension("city", "order", "city", "城市", ()),
+            SemanticDimension("city", "order", "city", "城市", ("城市",)),
             SemanticDimension("status", "order", "status", "订单状态", ("状态",)),
             SemanticDimension("car_tier", "order", "car_tier", "车型档次", ()),
         )

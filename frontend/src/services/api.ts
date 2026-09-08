@@ -267,7 +267,89 @@ export async function deleteSession(sessionId: string): Promise<void> {
   const res = await fetchWithAuth(`${API_BASE}/sessions/${sessionId}`, {
     method: 'DELETE',
   });
-  if (!res.ok) throw new Error(`delete failed: ${res.status}`);
+  if (!res.ok) throw new Error('删除会话失败');
+}
+
+async function readApiError(res: Response, fallback: string): Promise<string> {
+  const err = await res.json().catch(() => ({}));
+  const detail = err.detail;
+  if (typeof detail === 'string' && detail) return detail;
+  if (detail && typeof detail === 'object' && detail.message) return String(detail.message);
+  return fallback;
+}
+
+export interface BoardTile {
+  tile_id: string;
+  query_id: string;
+  title: string;
+  seed_key?: string;
+  position?: number;
+  metrics?: string[];
+  dimensions?: string[];
+  filters?: Array<{ field: string; op: string; value: unknown }>;
+  time_range?: { start: string; end: string; field?: string } | null;
+  time_grain?: string | null;
+}
+
+export interface Board {
+  board_id: string;
+  space_id: string;
+  title: string;
+  tiles: BoardTile[];
+}
+
+export interface BoardTileData extends BoardTile {
+  rows: Record<string, unknown>[];
+  columns: string[];
+  rows_count: number;
+  chart: {
+    type: string;
+    x_field: string;
+    y_fields: string[];
+    labels: Record<string, string>;
+    value_format: string | null;
+  } | null;
+  sql?: string;
+  via_harness?: boolean;
+  patch_source?: string;
+  semantic_parser?: boolean;
+  message?: string;
+}
+
+export async function getBoard(spaceId: string): Promise<Board> {
+  const res = await fetchWithAuth(`${API_BASE}/boards?space_id=${encodeURIComponent(spaceId)}`);
+  if (!res.ok) throw new Error(await readApiError(res, '无法加载看板'));
+  return res.json();
+}
+
+export async function pinQueryToBoard(spaceId: string, queryId: string, title = ''): Promise<{ tile_id: string; query_id: string; title: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/boards/tiles`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ space_id: spaceId, query_id: queryId, title }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, '钉盘失败'));
+  return res.json();
+}
+
+export async function refreshBoardTile(spaceId: string, tileId: string): Promise<BoardTileData> {
+  const res = await fetchWithAuth(`${API_BASE}/boards/tiles/${encodeURIComponent(tileId)}/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ space_id: spaceId }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, '刷新失败'));
+  return res.json();
+}
+
+export async function openTileChat(spaceId: string, tileId: string): Promise<{ id: string; session_id: string; title?: string; query_id?: string }> {
+  const res = await fetchWithAuth(`${API_BASE}/boards/tiles/${encodeURIComponent(tileId)}/open-chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ space_id: spaceId }),
+  });
+  if (!res.ok) throw new Error(await readApiError(res, '无法进入对话'));
+  return res.json();
 }
 
 export async function renameSession(sessionId: string, title: string): Promise<void> {

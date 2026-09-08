@@ -85,6 +85,9 @@ _L0_HELP = frozenset({
     "功能介绍", "有什么功能", "你可以帮我干什么", "能帮我做什么",
     # NOTE: bare "?"/"？" is NOT L0 — may be schema follow-up after data_map
 })
+_L0_SCHEMA = frozenset({
+    "这个库有什么表", "有什么表", "有哪些表",
+})
 _L0_BUTTON_ACTIONS = {
     "generate_deep_diagnosis": "diagnosis",
     "deep_diagnosis": "diagnosis",
@@ -125,7 +128,7 @@ _L2_DIAGNOSIS_PATTERNS = (
     "没有数据", "为空", "怎么是", "怎么没有", "是不是不对",
     "为什么查不到", "什么原因", "深度诊断", "诊断报告", "根因", "归因",
 )
-_L2_FOLLOW_UP = ("拆一下", "按", "换", "刚才", "上一个", "这个", "它", "改成", "再", "继续", "同样")
+_L2_FOLLOW_UP = ("拆一下", "按", "换", "刚才", "上一个", "这个", "它", "改成", "再", "继续", "同样", "不要", "去掉", "只看", "改回")
 _L2_QUERY = (
     "趋势", "多少", "统计", "查询", "查", "看", "分析", "排行", "分布", "拆",
     "最近", "昨天", "本月", "成功率", "gmv", "订单", "合计", "汇总", "均值",
@@ -308,6 +311,8 @@ def l0_fast_path(message: str, *, button_action: str | None = None) -> Superviso
         return _decision_from_intent("chat", message, confidence=1.0, fallback_used=False, layer="L0")
     if q_l in _L0_HELP or q in _L0_HELP:
         return _decision_from_intent("help", message, confidence=1.0, fallback_used=False, layer="L0")
+    if q in _L0_SCHEMA:
+        return _decision_from_intent("schema_understanding", message, confidence=1.0, fallback_used=False, layer="L0")
 
     # A greeting plus a product-capability question is still a deterministic
     # help request. Split only on punctuation and require every clause to be a

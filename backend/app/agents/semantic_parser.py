@@ -144,6 +144,44 @@ class SemanticParser:
                 return SemanticParseResult(False, error=f"unknown_filter:{item.field}", raw_payload=response.json_payload)
         return SemanticParseResult(True, query=query, raw_payload=response.json_payload)
 
+    def parse_patch(
+        self,
+        question: str,
+        model: SemanticModel,
+        snapshot_payload: dict[str, Any],
+        *,
+        original_question: str | None = None,
+    ) -> dict[str, Any] | None:
+        system = (
+            "你是追问补丁解析器。只能改动底稿中的语义对象。"
+            "只输出 JSON：action(add_dimensions|replace_dimensions|add_filters|replace_filters|"
+            "remove_filters|replace_time|replace_grain|replace_metrics|reset|clarify|noop),"
+            "dimensions, metrics, filters([{field,op,value}]), remove_fields, "
+            "time_range({start,end,field}|null), time_grain, unresolved_slots。"
+            "按某维拆用 add_dimensions；换成按某维用 replace_dimensions；只看某值用 add_filters；"
+            "不要某限制用 remove_filters；改指标用 replace_metrics。禁止编造底稿以外的指标。"
+        )
+        payload = {
+            "question": question,
+            "original_question": original_question or question,
+            "snapshot": snapshot_payload,
+            "semantic_model": model.prompt_summary(),
+        }
+        response = self._complete_with_deadline(
+            ModelRequest(
+                system=system,
+                user=json.dumps(payload, ensure_ascii=False),
+                tier=ModelTier.FLASH,
+                thinking=ThinkingLevel.NONE,
+                max_tokens=500,
+                expect_json=True,
+                temperature=0.0,
+            )
+        )
+        if not response.ok or not isinstance(response.json_payload, dict):
+            return None
+        return response.json_payload
+
     @staticmethod
     def _normalise_query_time(
         query: SemanticQueryRequest, question: str, model: SemanticModel

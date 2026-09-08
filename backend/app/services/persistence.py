@@ -136,6 +136,9 @@ def save_message(
     *,
     user_id: int | None = None,
     space_id: str | None = None,
+    query_id: str | None = None,
+    sql_text: str | None = None,
+    chart_type: str | None = None,
 ):
     """保存单条消息到 chat_messages，并更新 session 时间戳。
 
@@ -149,12 +152,15 @@ def save_message(
         if not _session_owned(conn, session_id, user_id=user_id, space_id=space_id):
             return
         conn.execute(text("""
-            INSERT INTO chat_messages (id, session_id, role, content, meta)
-            VALUES (:id, :sid, :role, :content, :meta)
+            INSERT INTO chat_messages (id, session_id, role, content, meta, query_id, sql_text, chart_type)
+            VALUES (:id, :sid, :role, :content, :meta, :query_id, :sql_text, :chart_type)
         """), {
             "id": msg_id, "sid": session_id, "role": role,
             "content": content or "",
             "meta": json.dumps(meta, ensure_ascii=False, default=str) if meta else None,
+            "query_id": query_id,
+            "sql_text": sql_text,
+            "chart_type": chart_type,
         })
         if user_id is not None and space_id is not None:
             conn.execute(
@@ -207,17 +213,22 @@ def persist_turn_result(
 
     rows = list(public.get("rows") or [])
     raw_trace = list(public.get("trace") or [])
-    _META_ROWS_CAP = 200
+    evidence = public.get("evidence") if isinstance(public.get("evidence"), dict) else {}
+    query_id = str(evidence.get("query_id") or public.get("query_id") or "")
+    chart = public.get("chart")
+    chart_type = ""
+    if isinstance(chart, dict):
+        chart_type = str(chart.get("type") or "")
     meta: dict[str, Any] = {
         "type": public.get("type") or public.get("response_type") or "answer",
         "trace_id": public.get("trace_id") or "",
-        "sql": public.get("sql") or "",
         "columns": list(public.get("columns") or []),
         "rows_count": int(public.get("rows_count") or len(rows) or 0),
-        "rows": rows[:_META_ROWS_CAP],
         "terminal_status": public.get("terminal_status") or "",
         "stop_reason": public.get("stop_reason") or "",
         "kernel_route": public.get("kernel_route") or "",
+        "query_id": query_id,
+        "chart_type": chart_type,
         "trace": [
             {
                 "node": (s or {}).get("node") if isinstance(s, dict) else None,
@@ -234,7 +245,6 @@ def persist_turn_result(
         "intent",
         "data_map",
         "db_identity",
-        "analysis_spec",
         "query_outcome",
         "evidence",
         "artifacts",
@@ -269,6 +279,9 @@ def persist_turn_result(
         meta,
         user_id=int(user_id),
         space_id=str(space_id),
+        query_id=query_id or None,
+        sql_text=str(public.get("sql") or "") or None,
+        chart_type=chart_type or None,
     )
     if rename:
         try:

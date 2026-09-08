@@ -196,6 +196,7 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
     ]
     # dimensions (not for sample/row preview)
     group_cols = []
+    group_by_cols = []
     time_group_by_field: dict[str, str] = {}
     if not is_sample:
         for d in spec.dimensions or []:
@@ -206,13 +207,16 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
                 fmt = formats.get(grain)
                 if fmt:
                     time_group_expr = f"DATE_FORMAT({_qident(tname)}.{_qident(field)}, '{fmt}')"
-                    group_cols.append(time_group_expr)
+                    group_cols.append(f"{time_group_expr} AS {_qident('time_bucket')}")
+                    group_by_cols.append(time_group_expr)
                     time_group_by_field[field] = time_group_expr
                 continue
             # dimension may be table.field or field
             if "." in d:
                 t, c = d.split(".", 1)
-                group_cols.append(f"{_qident(t)}.{_qident(c)}")
+                expr = f"{_qident(t)}.{_qident(c)}"
+                group_cols.append(expr)
+                group_by_cols.append(expr)
             else:
                 # find table
                 col_sql = None
@@ -223,6 +227,7 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
                         break
                 if col_sql:
                     group_cols.append(col_sql)
+                    group_by_cols.append(col_sql)
         select_parts = group_cols + select_parts
 
     where = []
@@ -266,8 +271,8 @@ def compile_spec(spec: AnalysisSpec, catalog: SemanticCatalog) -> CompileResult:
     sql = f"SELECT {', '.join(select_parts)} FROM {_qident(base)}{join_sql}"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    if group_cols:
-        sql += " GROUP BY " + ", ".join(group_cols)
+    if group_by_cols:
+        sql += " GROUP BY " + ", ".join(group_by_cols)
     if spec.ordering:
         # simple
         ord_parts = []

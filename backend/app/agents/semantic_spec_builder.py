@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.agents.analysis_spec import AnalysisSpec, FilterExpr, Measure, TimeRange
 from app.agents.semantic_catalog import SemanticCatalog
 from app.agents.semantic_model import SemanticModel
@@ -30,7 +32,7 @@ def build_analysis_spec(query: SemanticQueryRequest, model: SemanticModel, catal
     for item in query.filters:
         dim = model.dimension(item.field)
         field = dim.field if dim else item.field
-        filters.append(FilterExpr(field, item.op, item.value, entity.table))
+        filters.append(FilterExpr(field, item.op, _canonical_filter_value(field, item.value), entity.table))
     time_range = None
     if query.time_range:
         field = query.time_range.field or entity.time_field
@@ -42,3 +44,21 @@ def build_analysis_spec(query: SemanticQueryRequest, model: SemanticModel, catal
         required_tables=[entity.table], confidence=0.9, original_question=original_question,
         unresolved_slots=list(query.unresolved_slots or []),
     )
+
+
+_PRODUCT_TYPE_VALUES = {
+    "酒店": "hotel",
+    "hotel": "hotel",
+    "用车": "car",
+    "车": "car",
+    "car": "car",
+    "门票": "ticket",
+    "ticket": "ticket",
+}
+
+
+def _canonical_filter_value(field: str, value: Any) -> Any:
+    if field != "product_type":
+        return value
+    text = str(value or "").strip()
+    return _PRODUCT_TYPE_VALUES.get(text, _PRODUCT_TYPE_VALUES.get(text.lower(), value))

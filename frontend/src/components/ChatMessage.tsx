@@ -1,5 +1,5 @@
 import { Collapse, Table, Button } from 'antd';
-import { LineChartOutlined } from '@ant-design/icons';
+import { LineChartOutlined, PushpinOutlined } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import type { ChatResponse, MetricCandidate, ChartConfig, PlanResult } from '../types';
 import type { DataMapQuestion } from '../services/api';
@@ -29,6 +29,7 @@ interface Props {
   onOpenTrace?: (data: ChatResponse) => void;
   /** 基于当前查询结果触发深度诊断（条件编排入口） */
   onGenerateDiagnosis?: (question: string, data: ChatResponse) => void;
+  onPinToBoard?: (queryId: string, title: string) => void;
 }
 
 function formatValue(val: unknown, format: string | null): string {
@@ -140,7 +141,7 @@ function ChartBlock({ chart, columns, rows }: { chart: ChartConfig; columns: str
   return null;
 }
 
-export default function ChatMessage({ role, content, data, onCandidateClick, onOpenTrace, onGenerateDiagnosis }: Props) {
+export default function ChatMessage({ role, content, data, onCandidateClick, onOpenTrace, onGenerateDiagnosis, onPinToBoard }: Props) {
   if (role === 'user') {
     return (
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 20 }}>
@@ -409,8 +410,9 @@ export default function ChatMessage({ role, content, data, onCandidateClick, onO
             )}
 
             {/* 基于当前结果生成深度诊断报告（条件编排入口） */}
-            {data!.rows && data!.rows.length > 0 && onGenerateDiagnosis && (
-              <div style={{ marginBottom: 10 }}>
+            {data!.rows && data!.rows.length > 0 && (onGenerateDiagnosis || onPinToBoard) && (
+              <div style={{ marginBottom: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {onGenerateDiagnosis && (
                 <Button
                   size="small"
                   type="default"
@@ -431,6 +433,23 @@ export default function ChatMessage({ role, content, data, onCandidateClick, onO
                 >
                   基于当前结果生成深度诊断报告
                 </Button>
+                )}
+                {onPinToBoard && typeof data!.evidence?.query_id === 'string' && data!.evidence.query_id && (
+                  <Button
+                    size="small"
+                    icon={<PushpinOutlined />}
+                    onClick={() => onPinToBoard(String(data!.evidence?.query_id), content.slice(0, 40))}
+                    style={{
+                      borderColor: BRAND_BORDER,
+                      color: BRAND_TEXT,
+                      background: 'rgba(255, 255, 255, 0.04)',
+                      borderRadius: 8,
+                      fontSize: 12,
+                    }}
+                  >
+                    钉到看板
+                  </Button>
+                )}
               </div>
             )}
 

@@ -203,6 +203,7 @@ class ActiveAnalysisState:
     catalog_fingerprint: str = ""
     catalog_version: str = ""
     version: int = 1  # optimistic concurrency / active_state_version
+    semantic_snapshot: Optional[dict] = None
 
     @classmethod
     def from_spec(
@@ -253,6 +254,9 @@ class ActiveAnalysisState:
     def is_valid(self) -> bool:
         if self.valid_until and time.time() > self.valid_until:
             return False
+        snap = self.semantic_snapshot if isinstance(self.semantic_snapshot, dict) else {}
+        if snap.get("metrics") or snap.get("entity"):
+            return True
         return bool(self.measures or self.last_analysis_spec_id)
 
     def to_spec(self, original_question: str = "") -> AnalysisSpec:
@@ -321,3 +325,19 @@ def state_from_dict(data: dict[str, Any] | None) -> Optional[ActiveAnalysisState
 
 def serialize_state(state: Optional[ActiveAnalysisState]) -> Optional[dict[str, Any]]:
     return state.to_dict() if state else None
+
+
+def slim_state_payload(state: Optional[ActiveAnalysisState]) -> dict[str, Any]:
+    """Identity + CAS metadata only. Snapshot lives in session_queries."""
+    if state is None:
+        return {}
+    return {
+        "session_id": state.session_id,
+        "user_id": state.user_id,
+        "space_id": state.space_id,
+        "catalog_fingerprint": state.catalog_fingerprint or "",
+        "catalog_version": state.catalog_version or "",
+        "valid_until": float(state.valid_until or 0),
+        "last_analysis_spec_id": state.last_analysis_spec_id or "",
+        "last_sql": (state.last_sql or "")[:500],
+    }

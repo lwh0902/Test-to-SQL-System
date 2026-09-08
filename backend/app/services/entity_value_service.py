@@ -169,6 +169,7 @@ def resolve_filter_values(
     resolved: list[FilterExpr] = []
     ambiguities: list[str] = []
     q = re.sub(r"\s+", "", question or "")
+    q_names = re.sub(r"(?i)GMV|成交额|交易额|订单数|订单量|取消率|退款率", "", q)
     seen_dimensions = {item.field for item in filters}
     for item in filters:
         if item.field not in _NAME_DIMENSIONS:
@@ -178,18 +179,20 @@ def resolve_filter_values(
         candidates = []
         for entry in by_dimension.get(item.field, []):
             names = (entry.canonical_value, *entry.aliases)
-            if entry.canonical_value in q or any(alias and alias in q for alias in names):
+            if entry.canonical_value in q_names or any(alias and alias in q_names for alias in names):
                 candidates.append(entry)
         # The model may split one real name across city + shortened name. Require
         # the full canonical value to occur in the user's text before repair.
         unique = {x.canonical_value: x for x in candidates}
+        known = {entry.canonical_value for entry in by_dimension.get(item.field, [])}
         if len(unique) == 1:
             canonical = next(iter(unique.values())).canonical_value
             resolved.append(FilterExpr(item.field, item.op, canonical, item.table))
         elif len(unique) > 1:
             ambiguities.append(item.field)
-        elif original and original in q and not by_dimension.get(item.field):
-            # Preserve an exact user term; no dictionary match means no rewrite.
+        elif original and (original in q or original in known):
+            # Keep an already-grounded inherited filter even if this turn
+            # only changes metric/time and does not repeat the business name.
             resolved.append(item)
         else:
             ambiguities.append(item.field)
@@ -203,8 +206,8 @@ def resolve_filter_values(
         matches = {
             entry.canonical_value: entry
             for entry in entries
-            if entry.canonical_value in q
-            or any(alias and alias in q for alias in entry.aliases)
+            if entry.canonical_value in q_names
+            or any(alias and alias in q_names for alias in entry.aliases)
         }
         if len(matches) == 1:
             resolved.append(FilterExpr(dimension, "=", next(iter(matches)), ""))

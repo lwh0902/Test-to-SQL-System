@@ -1,0 +1,454 @@
+# B2B 出行分销分析指标（用车 / 酒店 / 门票）
+gmv:
+  name: GMV 成交额
+  description: 已支付/已履约订单的 GMV（口径=deal_amount）
+  allowed_dimensions:
+    - date
+    - product_type
+    - channel_name
+    - supplier_name
+    - country
+    - city
+    - region_group
+    - car_tier
+  default_dimension: date
+  max_time_range_days: 366
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+    - anomaly_breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - tb_orders
+  table_aliases:
+    main: tb_orders
+    orders: tb_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [gmv]
+      labels:
+        gmv: GMV (元)
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [gmv]
+      labels:
+        gmv: GMV (元)
+      value_format: number
+    fact:
+      type: stat
+      y_fields: [gmv]
+      labels:
+        gmv: GMV (元)
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ orders }}.booked_at) AS {{ dimension }},
+        ROUND(SUM({{ orders }}.gmv), 2) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'fulfilled')
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        ROUND(SUM(gmv), 2) AS gmv,
+        COUNT(*) AS order_count,
+        ROUND(AVG(deal_amount), 2) AS avg_deal_amount
+      FROM {{ orders }}
+      WHERE booked_at >= :start_time
+        AND booked_at < :end_time
+        AND status IN ('paid', 'fulfilled')
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ orders }}.{{ dimension }} AS dimension_value,
+        ROUND(SUM({{ orders }}.gmv), 2) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'fulfilled')
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ orders }}.{{ dimension }}
+      ORDER BY gmv DESC
+      LIMIT :limit
+
+order_count:
+  name: 订单数
+  description: B2B 出行订单数量（含各状态）
+  allowed_dimensions:
+    - date
+    - product_type
+    - channel_name
+    - supplier_name
+    - status
+    - country
+    - city
+    - region_group
+    - car_tier
+    - channel_kind
+  default_dimension: date
+  max_time_range_days: 366
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+    - anomaly_breakdown
+    - comparison
+  roles:
+    - admin
+    - operator
+    - product
+    - tester
+  permitted_tables:
+    - tb_orders
+  table_aliases:
+    main: tb_orders
+    orders: tb_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [order_count]
+      labels:
+        order_count: 订单数
+      value_format: number
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [order_count]
+      labels:
+        order_count: 订单数
+      value_format: number
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ orders }}.booked_at) AS {{ dimension }},
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN {{ orders }}.status IN ('paid', 'fulfilled') THEN 1 ELSE 0 END) AS paid_count,
+        SUM(CASE WHEN {{ orders }}.status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) AS cancel_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN status IN ('paid', 'fulfilled') THEN 1 ELSE 0 END) AS paid_count,
+        SUM(CASE WHEN status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) AS cancel_count
+      FROM {{ orders }}
+      WHERE booked_at >= :start_time
+        AND booked_at < :end_time
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ orders }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ orders }}.{{ dimension }}
+      ORDER BY order_count DESC
+      LIMIT :limit
+
+cancel_rate:
+  name: 取消退款率
+  description: 取消+退款订单占比
+  allowed_dimensions:
+    - date
+    - product_type
+    - product_name
+    - channel_name
+    - city
+  default_dimension: date
+  max_time_range_days: 366
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+    - anomaly_breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - tb_orders
+  table_aliases:
+    main: tb_orders
+    orders: tb_orders
+  sensitive_fields: []
+  chart:
+    trend:
+      type: line
+      x_field: date
+      y_fields: [cancel_rate]
+      labels:
+        cancel_rate: 取消率 (%)
+      value_format: percent
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [cancel_rate]
+      labels:
+        cancel_rate: 取消率 (%)
+      value_format: percent
+  sql_templates:
+    trend: >
+      SELECT
+        DATE({{ orders }}.booked_at) AS {{ dimension }},
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN {{ orders }}.status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) AS cancel_count,
+        ROUND(SUM(CASE WHEN {{ orders }}.status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS cancel_rate
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+    fact: >
+      SELECT
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) AS cancel_count,
+        ROUND(SUM(CASE WHEN status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS cancel_rate
+      FROM {{ orders }}
+      WHERE booked_at >= :start_time
+        AND booked_at < :end_time
+        AND workspace_id = :workspace_id
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ orders }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS order_count,
+        SUM(CASE WHEN {{ orders }}.status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) AS cancel_count,
+        ROUND(SUM(CASE WHEN {{ orders }}.status IN ('cancelled', 'refunded') THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0), 2) AS cancel_rate
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ orders }}.{{ dimension }}
+      HAVING order_count >= 5
+      ORDER BY cancel_rate DESC
+      LIMIT :limit
+
+channel_gmv:
+  name: 渠道 GMV
+  description: 按渠道统计的成交 GMV 与订单数
+  allowed_dimensions:
+    - channel_name
+    - channel_kind
+    - date
+  default_dimension: channel_name
+  max_time_range_days: 366
+  allowed_query_types:
+    - fact
+    - trend
+    - breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - tb_orders
+  table_aliases:
+    main: tb_orders
+    orders: tb_orders
+  sensitive_fields: []
+  chart:
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [gmv]
+      labels:
+        gmv: GMV (元)
+      value_format: number
+  sql_templates:
+    fact: >
+      SELECT
+        channel_name AS channel,
+        channel_kind,
+        ROUND(SUM(gmv), 2) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE booked_at >= :start_time
+        AND booked_at < :end_time
+        AND status IN ('paid', 'fulfilled')
+        AND workspace_id = :workspace_id
+      GROUP BY channel_name, channel_kind
+      ORDER BY gmv DESC
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ orders }}.{{ dimension }} AS dimension_value,
+        ROUND(SUM({{ orders }}.gmv), 2) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'fulfilled')
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ orders }}.{{ dimension }}
+      ORDER BY gmv DESC
+      LIMIT :limit
+    trend: >
+      SELECT
+        DATE({{ orders }}.booked_at) AS {{ dimension }},
+        ROUND(SUM({{ orders }}.gmv), 2) AS gmv,
+        COUNT(*) AS order_count
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.status IN ('paid', 'fulfilled')
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit
+
+supplier_win_rate:
+  name: 供应商中标率
+  description: 供应商报价中标次数 / 参与报价次数
+  allowed_dimensions:
+    - supplier_name
+    - date
+  default_dimension: supplier_name
+  max_time_range_days: 366
+  allowed_query_types:
+    - fact
+    - breakdown
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - tb_order_quotes
+  table_aliases:
+    main: tb_order_quotes
+    quotes: tb_order_quotes
+  sensitive_fields: []
+  chart:
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [win_rate]
+      labels:
+        win_rate: 中标率 (%)
+      value_format: percent
+  sql_templates:
+    fact: >
+      SELECT
+        supplier_name,
+        COUNT(*) AS quote_count,
+        SUM(is_winner) AS win_count,
+        ROUND(SUM(is_winner) * 100.0 / NULLIF(COUNT(*), 0), 2) AS win_rate
+      FROM {{ quotes }}
+      WHERE created_at >= :start_time
+        AND created_at < :end_time
+        AND workspace_id = :workspace_id
+      GROUP BY supplier_name
+      HAVING quote_count >= 20
+      ORDER BY win_rate DESC
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ quotes }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS quote_count,
+        SUM({{ quotes }}.is_winner) AS win_count,
+        ROUND(SUM({{ quotes }}.is_winner) * 100.0 / NULLIF(COUNT(*), 0), 2) AS win_rate
+      FROM {{ quotes }}
+      WHERE {{ quotes }}.created_at >= :start_time
+        AND {{ quotes }}.created_at < :end_time
+        AND {{ quotes }}.workspace_id = :workspace_id
+      GROUP BY {{ quotes }}.{{ dimension }}
+      HAVING quote_count >= 20
+      ORDER BY win_rate DESC
+      LIMIT :limit
+
+product_type_mix:
+  name: 品类结构
+  description: 用车/酒店/门票的订单与 GMV 结构
+  allowed_dimensions:
+    - product_type
+    - date
+  default_dimension: product_type
+  max_time_range_days: 366
+  allowed_query_types:
+    - fact
+    - breakdown
+    - trend
+  roles:
+    - admin
+    - operator
+    - product
+  permitted_tables:
+    - tb_orders
+  table_aliases:
+    main: tb_orders
+    orders: tb_orders
+  sensitive_fields: []
+  chart:
+    breakdown:
+      type: bar
+      x_field: dimension_value
+      y_fields: [gmv]
+      labels:
+        gmv: GMV (元)
+      value_format: number
+  sql_templates:
+    fact: >
+      SELECT
+        product_type,
+        COUNT(*) AS order_count,
+        ROUND(SUM(CASE WHEN status IN ('paid', 'fulfilled') THEN gmv ELSE 0 END), 2) AS gmv
+      FROM {{ orders }}
+      WHERE booked_at >= :start_time
+        AND booked_at < :end_time
+        AND workspace_id = :workspace_id
+      GROUP BY product_type
+      ORDER BY gmv DESC
+      LIMIT :limit
+    breakdown: >
+      SELECT
+        {{ orders }}.{{ dimension }} AS dimension_value,
+        COUNT(*) AS order_count,
+        ROUND(SUM(CASE WHEN {{ orders }}.status IN ('paid', 'fulfilled') THEN {{ orders }}.gmv ELSE 0 END), 2) AS gmv
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ orders }}.{{ dimension }}
+      ORDER BY gmv DESC
+      LIMIT :limit
+    trend: >
+      SELECT
+        DATE({{ orders }}.booked_at) AS {{ dimension }},
+        {{ orders }}.product_type,
+        COUNT(*) AS order_count,
+        ROUND(SUM(CASE WHEN {{ orders }}.status IN ('paid', 'fulfilled') THEN {{ orders }}.gmv ELSE 0 END), 2) AS gmv
+      FROM {{ orders }}
+      WHERE {{ orders }}.booked_at >= :start_time
+        AND {{ orders }}.booked_at < :end_time
+        AND {{ orders }}.workspace_id = :workspace_id
+      GROUP BY {{ group_by }}, {{ orders }}.product_type
+      ORDER BY {{ dimension }} ASC
+      LIMIT :limit

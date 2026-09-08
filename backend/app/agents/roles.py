@@ -9,12 +9,14 @@ dev_spec:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+import uuid
 
 from app.a2a.contracts import A2AMessage
-from app.agents.harness import AgentHarness, AgentSkill, HarnessContext
+from app.agents.harness import AgentHarness, AgentSkill, HarnessConfig, HarnessContext
 from app.agents.model_adapter import ModelRequest, get_model_adapter, role_model_policy
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,7 @@ class QueryHarness(AgentHarness):
                 procedure="analysis-spec-query-v2",
                 policies=("read_only_db", "scoped_session", "no_legacy_graph"),
             ),
+            config=HarnessConfig(timeout_seconds=240.0),
         )
 
     async def execute(self, ctx: HarnessContext) -> dict:
@@ -50,9 +53,9 @@ class QueryHarness(AgentHarness):
             task_spec = {}
 
         # Prefer GapCompiler / Supervisor rewritten question + structured hints
-        if task_spec.get("question") and str(task_spec.get("question")).strip():
-            question = str(task_spec["question"]).strip()
         if task_spec.get("task_type") in ("gap_fill_query", "gap_fill") or m.payload.get("compiled_gap"):
+            if task_spec.get("question") and str(task_spec.get("question")).strip():
+                question = str(task_spec["question"]).strip()
             dims = task_spec.get("dimensions") or task_spec.get("suggested_dimensions") or []
             tables = task_spec.get("tables") or task_spec.get("suggested_tables") or []
             metric = task_spec.get("metric") or ""
@@ -66,49 +69,115 @@ class QueryHarness(AgentHarness):
             if hints and all(h.split("=", 1)[0] not in question for h in hints):
                 question = f"{question}\n【task_spec】{'；'.join(hints)}"
 
-        prev = ctx.working_memory
-        from app.agents.query_kernel import run_query_kernel
+            prev = ctx.working_memory
+            from app.agents.query_kernel import run_query_kernel
 
-        # optional connection override from payload (tests)
-        mysql_connection = m.payload.get("mysql_connection") if isinstance(m.payload, dict) else None
-        kr = run_query_kernel(
-            question,
-            space_id=m.space_id or "",
-            task_spec=task_spec,
-            user_id=int(m.user_id or 0),
-            session_id=m.session_id or "",
-            mysql_connection=mysql_connection if isinstance(mysql_connection, dict) else None,
-            execute=True,
-            preview_limit=100,
+            mysql_connection = m.payload.get("mysql_connection") if isinstance(m.payload, dict) else None
+            kr = run_query_kernel(
+                question,
+                space_id=m.space_id or "",
+                task_spec=task_spec,
+                user_id=int(m.user_id or 0),
+                session_id=m.session_id or "",
+                mysql_connection=mysql_connection if isinstance(mysql_connection, dict) else None,
+                execute=True,
+                preview_limit=100,
+            )
+            payload = kr.to_query_payload(preview_limit=100)
+            outcome = kr.outcome
+            art_status = (
+                "approved"
+                if outcome and outcome.status.value == "SUCCESS_WITH_DATA"
+                else ("failed" if outcome and outcome.status.value not in {"SUCCESS_EMPTY", "INVALID_REQUEST"} else "approved")
+            )
+            aid = ctx.artifacts.save(
+                artifact_type="QueryResult",
+                status=art_status,
+                payload=payload,
+            )
+            ctx.memory.update_working(
+                {
+                    **prev,
+                    "last_rows_count": payload["rows_count"],
+                    "last_sql": (payload.get("sql") or "")[:500],
+                    "last_columns": list(payload.get("columns") or [])[:30],
+                    "last_question": str(question)[:300],
+                    "kernel": "analysis_kernel_v2",
+                }
+            )
+            if payload["rows_count"]:
+                ctx.memory.append_experience_note(
+                    f"v2查询成功 rows={payload['rows_count']} cols={len(payload.get('columns') or [])}",
+                    meta={"kind": "query_stats", "kernel": "v2"},
+                )
+            return {"artifact_id": aid, "payload": payload}
+
+        from types import SimpleNamespace
+
+        from app.agents.semantic_query_runtime import (
+            query_event_sink,
+            run_semantic_query_runtime,
+            turn_result_to_harness_payload,
         )
-        payload = kr.to_query_payload(preview_limit=100)
-        outcome = kr.outcome
+        from app.application.contracts import TurnRequest
+
+        payload_in = m.payload if isinstance(m.payload, dict) else {}
+        original_question = str(payload_in.get("original_question") or question)
+        kernel_route = str(payload_in.get("kernel_route") or "analysis_kernel_v2")
+        supervisor_intent = str(payload_in.get("supervisor_intent") or "")
+        supervisor_params = payload_in.get("supervisor_params")
+        if not isinstance(supervisor_params, dict):
+            supervisor_params = task_spec.get("params") if isinstance(task_spec.get("params"), dict) else {}
+        mysql_connection = payload_in.get("mysql_connection")
+        pinned_query_id = str(payload_in.get("pinned_query_id") or task_spec.get("pinned_query_id") or "")
+        req = TurnRequest(
+            question=str(question),
+            user_id=int(m.user_id or 0),
+            space_id=m.space_id or "",
+            session_id=None if pinned_query_id else (m.session_id or None),
+            request_id=m.task_id,
+        )
+        decision = SimpleNamespace(
+            intent=supervisor_intent,
+            task_spec=SimpleNamespace(params=supervisor_params, task_type=task_spec.get("task_type") or ""),
+        )
+        tr = await asyncio.to_thread(
+            run_semantic_query_runtime,
+            req,
+            None,
+            decision=decision,
+            original_question=original_question,
+            event_sink=query_event_sink.get(),
+            kernel_route=kernel_route,
+            mysql_connection=mysql_connection if isinstance(mysql_connection, dict) else None,
+            pinned_query_id=pinned_query_id or None,
+        )
+        payload = turn_result_to_harness_payload(tr)
+        payload["via_harness"] = True
         art_status = (
             "approved"
-            if outcome and outcome.status.value == "SUCCESS_WITH_DATA"
-            else ("failed" if outcome and outcome.status.value not in {"SUCCESS_EMPTY", "INVALID_REQUEST"} else "approved")
+            if tr.terminal_status in {"SUCCESS_WITH_DATA", "SUCCESS_EMPTY"}
+            else ("failed" if tr.response_type == "error" else "approved")
         )
-        aid = ctx.artifacts.save(
-            artifact_type="QueryResult",
-            status=art_status,
-            payload=payload,
-        )
-        # Private memory: never store rows
-        ctx.memory.update_working(
-            {
-                **prev,
-                "last_rows_count": payload["rows_count"],
-                "last_sql": (payload.get("sql") or "")[:500],
-                "last_columns": list(payload.get("columns") or [])[:30],
-                "last_question": str(question)[:300],
-                "kernel": "analysis_kernel_v2",
-            }
-        )
-        if payload["rows_count"]:
-            ctx.memory.append_experience_note(
-                f"v2查询成功 rows={payload['rows_count']} cols={len(payload.get('columns') or [])}",
-                meta={"kind": "query_stats", "kernel": "v2"},
+        try:
+            aid = ctx.artifacts.save(artifact_type="QueryResult", status=art_status, payload=payload)
+        except Exception:
+            aid = f"query_{uuid.uuid4().hex[:16]}"
+        prev = ctx.working_memory or {}
+        try:
+            ctx.memory.update_working(
+                {
+                    **prev,
+                    "last_rows_count": payload.get("rows_count") or 0,
+                    "last_sql": str(payload.get("sql") or "")[:500],
+                    "last_columns": list(payload.get("columns") or [])[:30],
+                    "last_question": str(question)[:300],
+                    "kernel": "query_harness_v2",
+                    "via_harness": True,
+                }
             )
+        except Exception:
+            pass
         return {"artifact_id": aid, "payload": payload}
 
 

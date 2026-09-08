@@ -28,16 +28,13 @@ from app.agents.query_outcome import (
     build_outcome_from_query_payload,
     next_actions_for_outcome,
 )
-from app.models.schemas import ChartConfig, QueryIntent
+from app.models.schemas import QueryIntent
 from app.agents.analysis_pipeline import run_analysis
 from app.agents.analysis_state_repository import get_analysis_state_repository
 from app.agents.catalog_repository import get_catalog_repository
-from app.agents.controlled_loop import run_turn as run_controlled_turn
 from app.agents.diagnosis_summary_repository import get_diagnosis_summary_repository
 from app.agents.semantic_catalog import ReadinessStatus, analysis_allowed
 from app.agents.supervisor_decision import SupervisorDecision, decide as supervisor_decide
-from app.agents.semantic_parser import SemanticParser
-from app.agents.semantic_spec_builder import build_analysis_spec
 from app.services.semantic_model_service import get_semantic_model_service
 from app.pilot.flags import PilotFlags, default_flags
 from app.services.agent import AgentState, get_graph
@@ -739,6 +736,21 @@ class AnalysisApplicationService:
         )
         return self._attach_supervisor(tr, decision) if decision else tr
 
+    def _session_has_query_time(self, req: TurnRequest) -> bool:
+        if not req.session_id:
+            return False
+        try:
+            st = self._state_repo_or_default().load(req.session_id, req.user_id, req.space_id)
+        except Exception:
+            return False
+        if st is None:
+            return False
+        snap = getattr(st, "semantic_snapshot", None)
+        if isinstance(snap, dict) and snap.get("time_start") and snap.get("time_end"):
+            return True
+        tr = st.time_range if isinstance(getattr(st, "time_range", None), dict) else None
+        return bool(tr and tr.get("start") and tr.get("end"))
+
     def _pause_for_time_confirmation(
         self, req: TurnRequest, decision: SupervisorDecision
     ) -> TurnResult | None:
@@ -749,6 +761,8 @@ class AnalysisApplicationService:
 
         candidate = detect_time_confirmation(req.question)
         if candidate is None:
+            return None
+        if self._session_has_query_time(req):
             return None
         semantic_version = ""
         try:
@@ -1101,19 +1115,17 @@ class AnalysisApplicationService:
                     public_payload={"summary": "已生成数据目录"},
                 )
                 return self._attach_supervisor(tr, decision)
-            # use resolved_question for analysis
+            # use resolved_question for analysis; QueryHarness owns compile/execute
             resolved = decision.resolved_question or req.question
-            # temporarily swap question for planner
             orig_q = req.question
             try:
                 req.question = resolved
-                tr = await asyncio.to_thread(
-                    self._run_v2_analysis,
-                    req,
-                    cat,
-                    decision=decision,
-                    original_question=orig_q,
-                    event_sink=event_sink,
+                _record_run_event(
+                    event_sink, kind="query", status="started", agent="query", step="dispatch",
+                    public_payload={"summary": "正在把查询交给 Query Agent"},
+                )
+                tr = await self._dispatch_query_via_harness(
+                    req, cat, decision, original_question=orig_q, event_sink=event_sink
                 )
             finally:
                 req.question = orig_q
@@ -1130,6 +1142,99 @@ class AnalysisApplicationService:
             kernel_route=self.kernel_route,
         )
         return self._attach_supervisor(tr, decision)
+
+    async def _dispatch_query_via_harness(
+        self,
+        req: TurnRequest,
+        cat,
+        decision: SupervisorDecision,
+        *,
+        original_question: str,
+        event_sink: Any = None,
+    ) -> TurnResult:
+        from uuid import uuid4
+
+        from app.a2a.contracts import A2AMessage
+        from app.a2a.dispatcher import Dispatcher
+        from app.a2a.registry import registry as default_registry
+        from app.agents.dispatcher_agent_call import _ensure_harness_registered
+        from app.agents.semantic_query_runtime import query_event_sink, turn_result_from_harness_payload
+
+        _ensure_harness_registered()
+        session_id = req.session_id or f"sess_{req.user_id}"
+        task_id = f"task_{uuid4().hex[:16]}"
+        try:
+            from app.services.agent_runtime_store import create_task
+
+            created = create_task(
+                session_id, int(req.user_id), str(req.space_id or ""), req.question or ""
+            )
+            if created.get("id"):
+                task_id = str(created["id"])
+        except Exception:
+            pass
+
+        msg = A2AMessage(
+            correlation_id=task_id,
+            source_agent="supervisor",
+            target_agent="query",
+            idempotency_key=f"{task_id}:query:{uuid4().hex}",
+            payload={
+                "question": req.question,
+                "original_question": original_question or req.question,
+                "supervisor_intent": decision.intent if decision else "",
+                "task_spec": decision.task_spec.to_dict() if decision and decision.task_spec else {},
+                "supervisor_params": (
+                    decision.task_spec.params if decision and decision.task_spec else None
+                ),
+                "kernel_route": self.kernel_route,
+            },
+            task_id=task_id,
+            session_id=session_id,
+            user_id=int(req.user_id),
+            space_id=str(req.space_id or ""),
+        )
+        token = query_event_sink.set(event_sink)
+        try:
+            result = await Dispatcher(agent_registry=default_registry).deliver(msg)
+        except Exception as exc:
+            _record_run_event(
+                event_sink, kind="query", status="failed", agent="query", step="harness",
+                public_payload={"summary": "Query Agent 执行失败", "error_code": type(exc).__name__},
+            )
+            return TurnResult(
+                response_type="error",
+                message="查询执行失败，请稍后重试。",
+                answer="查询执行失败，请稍后重试。",
+                terminal_status=QueryOutcomeStatus.EXECUTION_ERROR.value,
+                stop_reason="query_harness_error",
+                kernel_route=self.kernel_route,
+                evidence={
+                    "via_harness": True,
+                    "query_agent": "query",
+                    "error": type(exc).__name__,
+                },
+                rows=[],
+                rows_count=0,
+            )
+        finally:
+            query_event_sink.reset(token)
+
+        tr = turn_result_from_harness_payload(result, kernel_route=self.kernel_route)
+        tr.task_id = task_id
+        evidence = tr.evidence if isinstance(tr.evidence, dict) else {}
+        tr.evidence = {
+            **evidence,
+            "via_harness": True,
+            "query_agent": "query",
+            "query_task_id": task_id,
+            "transport": "a2a_dispatcher",
+        }
+        _record_run_event(
+            event_sink, kind="query", status="completed", agent="query", step="harness",
+            public_payload={"summary": "Query Agent 已完成", "task_id": task_id, "via_harness": True},
+        )
+        return tr
 
     def _persist_turn(self, req: TurnRequest, tr: TurnResult) -> None:
         """Write user+assistant messages to MySQL under user/session/space isolation."""
@@ -1310,344 +1415,17 @@ class AnalysisApplicationService:
         original_question: str | None = None,
         event_sink: Any = None,
     ) -> TurnResult:
-        """R3+R4: controlled loop with ActiveAnalysisState load/save + live MySQL."""
-        try:
-            from app.services.authorized_connection_service import (
-                ConnectionUnavailable,
-                resolve_authorized_connection,
-            )
+        """Kept as a thin wrapper. Production chat dispatch goes through QueryHarness."""
+        from app.agents.semantic_query_runtime import run_semantic_query_runtime
 
-            conn = resolve_authorized_connection(
-                user_id=req.user_id,
-                space_id=req.space_id,
-            )
-        except ConnectionUnavailable:
-            return TurnResult(
-                response_type="error",
-                message="当前空间的数据源不可用或无权访问。",
-                answer="当前空间的数据源不可用或无权访问。",
-                terminal_status=QueryOutcomeStatus.PERMISSION_DENIED.value,
-                stop_reason="data_source_unavailable",
-                kernel_route=self.kernel_route,
-                rows=[],
-                rows_count=0,
-            )
-
-        state_repo = self._state_repo_or_default()
-        prior = None
-        state_invalidated = False
-        if req.session_id:
-            prior = state_repo.load(
-                req.session_id,
-                req.user_id,
-                req.space_id,
-                catalog_fingerprint=cat.schema_fingerprint or None,
-            )
-            # If file exists but fingerprint rejected → mark invalidated
-            if prior is None and state_repo.exists(req.session_id, req.user_id, req.space_id):
-                # try load without fp check to detect stale catalog
-                raw = state_repo.load(req.session_id, req.user_id, req.space_id)
-                if raw is not None:
-                    # exists path already returned None only on fp mismatch when fp passed;
-                    # re-check explicitly
-                    stored_fp = getattr(raw, "catalog_fingerprint", "") or ""
-                    if stored_fp and cat.schema_fingerprint and stored_fp != cat.schema_fingerprint:
-                        state_invalidated = True
-                        prior = None
-                    else:
-                        prior = raw
-
-        semantic_model = get_semantic_model_service().load_or_build(req.space_id, cat)
-        prior_spec = prior.to_spec(original_question=req.question).to_dict() if prior else None
-        _record_run_event(
-            event_sink, kind="semantic", status="started", agent="semantic", step="parse",
-            public_payload={"summary": "正在校验指标和筛选条件"},
-        )
-        parsed = SemanticParser().parse(
-            req.question,
-            semantic_model,
-            previous_spec=prior_spec,
-            supervisor_params=(decision.task_spec.params if decision else None),
-            original_question=original_question,
-        )
-        if not parsed.ok or parsed.query is None:
-            _record_run_event(
-                event_sink, kind="semantic", status="failed", agent="semantic", step="parse",
-                public_payload={"summary": "无法确认指标或条件"},
-            )
-            tr = self._enrich_clarification(
-                req,
-                "我还不能把这个问题可靠地映射到当前空间已定义的业务指标。请补充指标、对象或时间范围。",
-                slots=["metric"],
-                stop_reason="semantic_parse",
-            )
-            tr.evidence = {
-                **(tr.evidence if isinstance(tr.evidence, dict) else {}),
-                "semantic_parser_error": parsed.error,
-                "semantic_model_version": semantic_model.version,
-            }
-            return tr
-        if parsed.query.operation == "clarify" or parsed.query.unresolved_slots:
-            _record_run_event(
-                event_sink, kind="semantic", status="failed", agent="semantic", step="parse",
-                public_payload={"summary": "需要补充查询条件"},
-            )
-            return self._enrich_clarification(
-                req,
-                "还需要补充信息才能准确查询。",
-                slots=list(parsed.query.unresolved_slots or ["metric"]),
-                stop_reason="semantic_clarify",
-            )
-        try:
-            semantic_spec = build_analysis_spec(
-                parsed.query, semantic_model, cat, original_question=req.question
-            )
-        except ValueError:
-            _record_run_event(
-                event_sink, kind="semantic", status="failed", agent="semantic", step="validate",
-                public_payload={"summary": "指标或维度未在当前空间确认"},
-            )
-            return self._enrich_clarification(
-                req,
-                "这个问题中的指标或维度还没有在当前空间确认。",
-                slots=["metric"],
-                stop_reason="semantic_validation",
-            )
-
-        # Business-name grounding: auto-sync bounded distinct values (channels,
-        # suppliers, products) into the system DB, then repair a model-shortened
-        # name only if the user's original wording has exactly one full match.
-        try:
-            from app.services.entity_value_service import (
-                load_entity_values,
-                resolve_filter_values,
-                sync_entity_values_if_stale,
-            )
-
-            if conn and conn.get("database"):
-                sync_entity_values_if_stale(
-                    space_id=req.space_id, model=semantic_model, connection=conn
-                )
-            field_by_dimension = {d.id: d.field for d in semantic_model.dimensions}
-            values = load_entity_values(
-                req.space_id, field_by_dimension.keys(), field_by_dimension=field_by_dimension
-            )
-            resolution = resolve_filter_values(
-                semantic_spec.filters, original_question or req.question, values
-            )
-            if resolution.ambiguities:
-                _record_run_event(
-                    event_sink, kind="semantic", status="failed", agent="semantic", step="grounding",
-                    public_payload={"summary": "需要补充业务名称"},
-                )
-                return self._enrich_clarification(
-                    req,
-                    "找到了多个可能的业务名称，请补充更完整的渠道、供应商或产品名称。",
-                    slots=["subject"],
-                    stop_reason="entity_ambiguous",
-                )
-            semantic_spec.filters = resolution.filters
-        except Exception:
-            # Dictionary sync is an accuracy enhancement. Its temporary failure must
-            # not block a safe query that already has a complete semantic plan.
-            pass
-
-        # Final semantic guard: a SQL-safe plan is not necessarily an answer to
-        # the user's question.  Reject before compilation if an explicit model
-        # dimension, exact business name, or time range disappeared.
-        try:
-            from app.agents.semantic_coverage import validate_semantic_coverage
-
-            coverage = validate_semantic_coverage(
-                original_question or req.question,
-                semantic_spec,
-                semantic_model,
-                values if "values" in locals() else [],
-            )
-            if not coverage.ok:
-                _record_run_event(
-                    event_sink, kind="semantic", status="failed", agent="semantic", step="validate",
-                    public_payload={"summary": "查询条件未完整确认"},
-                )
-                tr = self._enrich_clarification(
-                    req,
-                    "我识别到的问题条件没有完整进入查询计划，为避免返回错误数据，请换一种说法或稍后重试。",
-                    slots=["query_condition"],
-                    stop_reason="semantic_coverage",
-                )
-                tr.evidence = {
-                    **(tr.evidence if isinstance(tr.evidence, dict) else {}),
-                    "semantic_coverage_errors": coverage.errors,
-                    "semantic_model_version": semantic_model.version,
-                }
-                return tr
-        except Exception:
-            # If the guard itself is unavailable, preserve the established parser
-            # validation path rather than turning a safe request into an outage.
-            pass
-
-        _record_run_event(
-            event_sink, kind="semantic", status="completed", agent="semantic", step="parse",
-            public_payload={"summary": "已生成受约束查询计划"},
-        )
-
-        loop = run_controlled_turn(
-            req.question,
+        return run_semantic_query_runtime(
+            req,
             cat,
-            state=prior,
-            mysql_connection=conn if (conn and conn.get("database")) else None,
-            session_id=req.session_id or "",
-            user_id=req.user_id,
-            space_id=req.space_id,
-            allow_heavy=False,
-            prebuilt_spec=semantic_spec,
-            semantic_followup=parsed.query.operation == "modify_query",
+            decision=decision,
+            original_question=original_question,
             event_sink=event_sink,
+            kernel_route=self.kernel_route,
         )
-
-        # Persist state after successful answer / query with state
-        if loop.state is not None and req.session_id and loop.action in {
-            "answer", "query", "stop_success", "stop_empty"
-        }:
-            try:
-                if not loop.state.catalog_fingerprint:
-                    loop.state.catalog_fingerprint = cat.schema_fingerprint or ""
-                if not loop.state.catalog_version:
-                    loop.state.catalog_version = str(getattr(cat, "version", "") or "")
-                # ``prior`` is the version read for this turn.  A newly created
-                # ActiveAnalysisState starts at logical version 1, so inferred
-                # versions are ambiguous; make the compare-and-swap explicit.
-                saved = state_repo.save(
-                    loop.state,
-                    expected_version=int(getattr(prior, "version", 0) or 0),
-                )
-                if not saved.get("ok"):
-                    _record_run_event(
-                        event_sink, kind="state", status="failed", agent="state", step="persist",
-                        public_payload={"summary": "会话上下文未保存", "error_code": saved.get("error", "unknown")},
-                    )
-            except Exception as exc:
-                _record_run_event(
-                    event_sink, kind="state", status="failed", agent="state", step="persist",
-                    public_payload={"summary": "会话上下文未保存", "error_code": type(exc).__name__},
-                )
-
-        # Map controlled loop → product TurnResult
-        if loop.action == "clarify":
-            tr = self._enrich_clarification(
-                req,
-                loop.answer_text or "请补充信息",
-                slots=list(loop.clarify_slots or []),
-                stop_reason="clarify",
-            )
-            tr.analysis_spec = loop.spec.to_dict() if loop.spec else None
-            tr.active_state_version = (
-                int(getattr(loop.state, "version", 0) or 0) if loop.state else None
-            )
-        elif loop.action == "refuse":
-            msg = loop.answer_text or "请求被拒绝"
-            term = "SQL_REJECTED" if ("写" in msg or "不安全" in msg or "拒绝" in msg) else "INVALID_REQUEST"
-            tr = TurnResult(
-                response_type="error",
-                message=msg,
-                answer=msg,
-                terminal_status=term,
-                stop_reason="refuse",
-                kernel_route=self.kernel_route,
-                sql=loop.sql or "",
-                analysis_spec=loop.spec.to_dict() if loop.spec else None,
-                rows=[],
-                rows_count=0,
-            )
-            if term == "SQL_REJECTED":
-                tr = _attach_outcome(tr, QueryOutcome.sql_rejected(message=msg, sql=loop.sql or ""))
-        else:
-            outcome = loop.outcome
-            # duplicate reuse may have no fresh outcome — use state preview
-            if outcome is None and loop.duplicate_skipped and loop.state:
-                rows = list(loop.state.last_result_preview or [])
-                cols = list(rows[0].keys()) if rows else []
-                rc = len(rows)
-                term = "SUCCESS_WITH_DATA" if rows else "SUCCESS_EMPTY"
-                msg = loop.answer_text or ""
-            elif outcome is not None:
-                rows = list(outcome.rows_preview or [])
-                cols = list(outcome.columns or [])
-                rc = int(outcome.rows_count or 0)
-                term = outcome.status.value
-                msg = loop.answer_text or ""
-            else:
-                rows, cols, rc, term = [], [], 0, ""
-                msg = loop.answer_text or ""
-
-            tr = TurnResult(
-                response_type="answer",
-                message=msg,
-                answer=msg,
-                terminal_status=term,
-                stop_reason=(
-                    "reuse" if loop.duplicate_skipped else (
-                        "stop_ok" if term == "SUCCESS_WITH_DATA" else (
-                            "stop_empty" if term == "SUCCESS_EMPTY" else "stop_ok"
-                        )
-                    )
-                ),
-                sql=loop.sql or (loop.state.last_sql if loop.state else "") or "",
-                columns=cols,
-                rows=rows,
-                rows_count=rc,
-                kernel_route=self.kernel_route,
-                analysis_spec=loop.spec.to_dict() if loop.spec else None,
-                query_outcome=outcome.to_public_dict() if outcome else None,
-                evidence=loop.evidence.to_dict() if loop.evidence else None,
-                active_state_version=int(getattr(loop.state, "version", 0) or 0) if loop.state else None,
-            )
-            if outcome:
-                tr = _attach_outcome(tr, outcome)
-
-        tr.trace = annotate_trace_kernel(
-            [
-                {
-                    "node": "controlled_loop_v2",
-                    "status": "done",
-                    "output": {
-                        "action": loop.action,
-                        "latency_ms": loop.latency_ms,
-                        "clarify_slots": list(loop.clarify_slots or []),
-                        "is_followup": loop.is_followup,
-                        "duplicate_skipped": loop.duplicate_skipped,
-                        "patch_ops": list(loop.patch_ops or []),
-                        "agents_called": list(loop.agents_called or []),
-                        "action_trace": list(loop.action_trace or []),
-                    },
-                }
-            ],
-            self.kernel_route,
-        )
-        base_ev = tr.evidence if isinstance(tr.evidence, dict) else {}
-        tr.evidence = {
-            **base_ev,
-            "catalog_version": cat.version,
-            "schema_fingerprint": cat.schema_fingerprint,
-            "catalog_readiness": cat.readiness.to_dict() if cat.readiness else None,
-            "catalog_source": "repository",
-            "pipeline": "controlled_loop_v2",
-            "duplicate_skipped": bool(loop.duplicate_skipped),
-            "is_followup": bool(loop.is_followup),
-            "agents_called": list(loop.agents_called or []),
-            "patch_ops": list(loop.patch_ops or []),
-            "state_invalidated": state_invalidated,
-            "semantic_model_version": semantic_model.version,
-            "semantic_model_provenance": semantic_model.provenance,
-            "semantic_parser": True,
-            "active_state_version": tr.active_state_version,
-        }
-        if cat.readiness and str(getattr(cat.readiness.status, "value", cat.readiness.status)) == "DEGRADED":
-            limits = list(cat.readiness.limited_capabilities or [])
-            if limits and tr.message and "受限" not in (tr.message or ""):
-                tr.message = (tr.message or "") + f"（Catalog DEGRADED，受限: {', '.join(limits[:4])}）"
-                tr.answer = tr.message
-        return tr
 
     def _seed_from_active_state(self, req: TurnRequest) -> dict | None:
         """Build diagnosis seed from ActiveAnalysisState (R4/R5)."""
